@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>org.cloudhoist</groupId>
+    <artifactId>pallet-apache-crate-pom</artifactId>
+    <version>0.4.0-SNAPSHOT</version>
+    <relativePath>../pallet-apache-crate-pom</relativePath>
+  </parent>
+  <artifactId>hadoop</artifactId>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>com.theoryinpractise</groupId>
+        <artifactId>clojure-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>
