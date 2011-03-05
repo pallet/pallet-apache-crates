@@ -52,7 +52,7 @@
   [request & {:keys [user group version home]
               :or {user hadoop-user
                    group hadoop-group
-                   version "3.3.1"}
+                   version "0.20.2"}
               :as options}]
   (let [url (url version)
         home (or home (format "%s-%s" install-path version))
@@ -86,8 +86,8 @@
 
 (defn hadoop-filesystem-dirs
   [request root]
-  (let [owner (parameter/get-for-target [:hadoop :owner])
-        group (parameter/get-for-target [:hadoop :group])]
+  (let [owner (parameter/get-for-target request [:hadoop :owner])
+        group (parameter/get-for-target request [:hadoop :group])]
     (directory/directory
      (str root "/hadoop") :owner owner :group group)
     (directory/directory
@@ -141,10 +141,10 @@
 
 (defn config-file
   [request properties]
-  (let [config-dir (parameter/get-for-target [:hadoop :config-dir])
-        log-dir (parameter/get-for-target [:hadoop :log-dir])
-        owner (parameter/get-for-target [:hadoop :owner])
-        group (parameter/get-for-target [:hadoop :group])]
+  (let [config-dir (parameter/get-for-target request [:hadoop :config-dir])
+        log-dir (parameter/get-for-target request [:hadoop :log-dir])
+        owner (parameter/get-for-target request [:hadoop :owner])
+        group (parameter/get-for-target request [:hadoop :group])]
     (->
      request
      (remote-file/remote-file
@@ -154,9 +154,9 @@
 
 (defn configure
   [request data-root name-node job-tracker {:as properties}]
-  (let [config-dir (parameter/get-for-target [:hadoop :config-dir])
-        pid-dir (parameter/get-for-target [:hadoop :pid-dir])
-        log-dir (parameter/get-for-target [:hadoop :log-dir])
+  (let [config-dir (parameter/get-for-target request [:hadoop :config-dir])
+        pid-dir (parameter/get-for-target request [:hadoop :pid-dir])
+        log-dir (parameter/get-for-target request [:hadoop :log-dir])
         env (str config-dir "/hadoop-env.sh")
         defaults
         {:ndfs.block.size 134217728
@@ -220,8 +220,8 @@
 (defn- hadoop-service
   "Run a Hadoop service"
   [request hadoop-daemon description]
-  (let [hadoop-home (parameter/get-for-target [:hadoop :home])
-        hadoop-user (parameter/get-for-target [:hadoop :user])]
+  (let [hadoop-home (parameter/get-for-target request [:hadoop :home])
+        hadoop-user (parameter/get-for-target request [:hadoop :owner])]
     (->
      request
      (exec-script/exec-checked-script
@@ -234,8 +234,8 @@
 (defn- hadoop-command
   "Run a Hadoop service"
   [request & args]
-  (let [hadoop-home (parameter/get-for-target [:hadoop :home])
-        hadoop-user (parameter/get-for-target [:hadoop :user])]
+  (let [hadoop-home (parameter/get-for-target request [:hadoop :home])
+        hadoop-user (parameter/get-for-target request [:hadoop :owner])]
     (->
      request
      (exec-script/exec-checked-script
@@ -252,8 +252,8 @@
    request
    (hadoop-service "namenode" "Name Node")
    (hadoop-command "dfsadmin" "-safemode" "wait")
-   (hadoop-command "fs" "-mkdir" "/user")
-   (hadoop-command "fs" "-chmod" "+w" "/user")))
+   (hadoop-command "fs" "-mkdir" data-dir)
+   (hadoop-command "fs" "-chmod" "+w" data-dir)))
 
 (defn secondary-name-node
   "Run a Hadoop secondary name node"
