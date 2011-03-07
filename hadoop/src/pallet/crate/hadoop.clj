@@ -30,6 +30,7 @@
    [pallet.resource.user :as user]
    [pallet.resource.filesystem-layout :as filesystem-layout]
    [pallet.script :as script]
+   [pallet.crate.java :as java]
    [clojure.contrib.prxml :as prxml]))
 
 (def install-path "/usr/local/hadoop")
@@ -213,7 +214,7 @@
 
 (script/defscript as-user [user & command])
 (stevedore/defimpl as-user :default [user & command]
-  (su -s "/bin/bash" - ~user -c ~@command))
+  (su -s "/bin/bash" ~user -c (str "JAVA_HOME=" (java-home)) ~@command))
 (stevedore/defimpl as-user [#{:yum}] [user & command]
   ("/sbin/runuser" -s "/bin/bash" - ~user -c ~@command))
 
@@ -229,6 +230,7 @@
       (as-user
        ~hadoop-user
        ~(str hadoop-home "/bin/hadoop-daemon.sh")
+       "start"
        ~hadoop-daemon)))))
 
 (defn- hadoop-command
