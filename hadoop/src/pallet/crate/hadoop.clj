@@ -31,7 +31,8 @@
    [pallet.resource.filesystem-layout :as filesystem-layout]
    [pallet.script :as script]
    [pallet.crate.java :as java]
-   [clojure.contrib.prxml :as prxml]))
+   [clojure.contrib.prxml :as prxml]
+   [clojure.string :as string]))
 
 (def install-path "/usr/local/hadoop")
 (def log-path "/var/log/hadoop")
@@ -133,14 +134,35 @@
     :hadoop.rpc.socket.factory.class.ClientProtocol
     :hadoop.rpc.socket.factory.class.JobSubmissionProtocol})
 
+
+;; from:
+;; http://nakkaya.com/2010/03/27/pretty-printing-xml-with-clojure/
+(defn ppxml [xml]
+  (let [in (javax.xml.transform.stream.StreamSource.
+            (java.io.StringReader. xml))
+        writer (java.io.StringWriter.)
+        out (javax.xml.transform.stream.StreamResult. writer)
+        transformer (.newTransformer
+                     (javax.xml.transform.TransformerFactory/newInstance))]
+    (.setOutputProperty transformer
+                        javax.xml.transform.OutputKeys/INDENT "yes")
+    (.setOutputProperty transformer
+                        "{http://xml.apache.org/xslt}indent-amount" "2")
+    (.setOutputProperty transformer
+                        javax.xml.transform.OutputKeys/METHOD "xml")
+    (.transform transformer in out)
+    (-> out .getWriter .toString)))
+
 (defn properties->xml
   [properties]
-  (prxml/prxml
-   [:decl! {:version "1.0"}]
-   [:configuration
-    (map
-     #(property->xml % (final-properties (key %)))
-     properties)]))
+  (ppxml
+   (with-out-str
+     (prxml/prxml
+      [:decl! {:version "1.0"}]
+      [:configuration
+       (map
+        #(property->xml % (final-properties (key %)))
+        properties)]))))
 
 (defn config-file
   [request properties]
@@ -155,12 +177,32 @@
       :content (properties->xml properties)
       :owner owner :group group))))
 
+(defn format-exports [export-map]
+  (string/join
+   (map (fn [[k v]]
+          (format "export %s=%s\n" k (name v)))
+        export-map)))
+
+(defn env-file
+  [request]
+  (let [pid-dir (parameter/get-for-target request [:hadoop :pid-dir])
+        log-dir (parameter/get-for-target request [:hadoop :log-dir])
+        config-dir (parameter/get-for-target request [:hadoop :config-dir])]
+    (->
+     request
+     (remote-file/remote-file
+      (str config-dir "/hadoop-env.sh")
+      :content
+      (format-exports
+       {:HADOOP_PID_DIR pid-dir
+        :HADOOP_SSH_OPTS "\"-o StrictHostKeyChecking=no\""
+        :HADOOP_OPTS "\"-Djava.net.preferIPv4Stack=true\""
+        :HADOOP_LOG_DIR (str log-dir "/logs")})))))
+
 (defn configure
   [request data-root name-node job-tracker {:as properties}]
-  (let [config-dir (parameter/get-for-target request [:hadoop :config-dir])
-        pid-dir (parameter/get-for-target request [:hadoop :pid-dir])
-        log-dir (parameter/get-for-target request [:hadoop :log-dir])
-        env (str config-dir "/hadoop-env.sh")
+  (let [log-dir (parameter/get-for-target request [:hadoop :log-dir])
+        owner (parameter/get-for-target request [:hadoop :owner])
         defaults
         {:ndfs.block.size 134217728
          :dfs.data.dir (str data-root "/hadoop/hdfs/data")
@@ -173,7 +215,7 @@
          :fs.checkpoint.dir (str data-root "/hadoop/hdfs/secondary")
          :fs.default.name (format "hdfs://%s:8020/" name-node)
          :fs.trash.interval 1440
-         :hadoop.tmp.dir (str data-root "/tmp/hadoop-${user.name}")
+         :hadoop.tmp.dir (str data-root (str "/tmp/hadoop" owner))
          :io.file.buffer.size 65536
          :mapred.child.java.opts "-Xmx550m"
          :mapred.child.ulimit 1126400
@@ -203,16 +245,8 @@
      request
      (hadoop-filesystem-dirs data-root)
      (config-file properties)
-     (file/sed
-      env
-      {".*HADOOP_PID_DIR=.*" (str "export HADOOP_PID_DIR=" pid-dir)
-       ".*HADOOP_SSH_OPTS=.*"
-         (str "export HADOOP_SSH_OPTS=\"-o StrictHostKeyChecking=no\"")
-       ".*HADOOP_OPTS=.*"
-         "export HADOOP_OPTS=\"-Djava.net.preferIPv4Stack=true\""
-       ".*HADOOP_LOG_DIR=.*"
-         (str "export HADOOP_LOG_DIR=" log-dir "/logs")})
-     (file/symbolic-link (str data-root "/hadoop/logs") (log-dir)))))
+     env-file
+     (file/symbolic-link (str data-root "/hadoop/logs") log-dir))))
 
 (script/defscript as-user [user & command])
 (stevedore/defimpl as-user :default [user & command]
