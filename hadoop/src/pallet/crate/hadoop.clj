@@ -70,7 +70,8 @@
       [:hadoop :group] group
       [:hadoop :config-dir] config-dir
       [:hadoop :data-dir] data-dir
-      [:hadoop :pid-dir] pid-dir)
+      [:hadoop :pid-dir] pid-dir
+      [:hadoop :log-dir] log-dir)
      (user/user user :system true)
      (user/group group :system true)
      (remote-directory/remote-directory
