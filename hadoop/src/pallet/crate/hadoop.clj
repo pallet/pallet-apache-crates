@@ -90,12 +90,13 @@
   [request root]
   (let [owner (parameter/get-for-target request [:hadoop :owner])
         group (parameter/get-for-target request [:hadoop :group])]
-    (directory/directory
-     (str root "/hadoop") :owner owner :group group)
-    (directory/directory
-     (str root "/hadoop/logs") :owner owner :group group)
-    (directory/directory
-     (str root "/tmp") :owner owner :group group :mode "a+rwxt")))
+    (-> request
+        (directory/directory
+         (str root "/hadoop") :owner owner :group group)
+        (directory/directory
+         (str root "/hadoop/logs") :owner owner :group group)
+        (directory/directory
+         (str root "/tmp") :owner owner :group group :mode "a+rwxt"))))
 
 
 (defn property->xml
