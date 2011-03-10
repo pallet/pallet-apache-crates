@@ -325,7 +325,7 @@
   [request]
   (-> request
       (hadoop-service "jobtracker" "job tracker")
-      (parameter/assoc-for-service
+      #_(parameter/assoc-for-service
        [:hadoop :mapred :job-tracker]
        (format "%s:8021" (request-map/target-ip)))))
 
