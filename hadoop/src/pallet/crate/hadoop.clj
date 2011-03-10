@@ -21,6 +21,7 @@
   (:require
    [pallet.parameter :as parameter]
    [pallet.stevedore :as stevedore]
+   [pallet.compute :as compute]
    [pallet.request-map :as request-map]
    [pallet.resource.directory :as directory]
    [pallet.resource.exec-script :as exec-script]
@@ -32,7 +33,8 @@
    [pallet.script :as script]
    [pallet.crate.java :as java]
    [clojure.contrib.prxml :as prxml]
-   [clojure.string :as string]))
+   [clojure.string :as string]
+   [clojure.contrib.logging :as log]))
 
 (def install-path "/usr/local/hadoop")
 (def log-path "/var/log/hadoop")
@@ -199,10 +201,20 @@
         :HADOOP_OPTS "\"-Djava.net.preferIPv4Stack=true\""
         :HADOOP_LOG_DIR (str log-dir "/logs")})))))
 
+(defn get-name-node-ip [request name]
+  (let [name-nodes (request-map/nodes-in-tag request name)
+        name-node (first name-nodes)]
+    (when (> (count name-nodes) 1)
+      (log/warn "There are more than one name-nodes"))
+    (if-not name-node
+      (log/error "There is no name-node defined!")
+      (compute/primary-ip name-node))))
+
 (defn configure
   [request data-root name-node job-tracker {:as properties}]
   (let [log-dir (parameter/get-for-target request [:hadoop :log-dir])
         owner (parameter/get-for-target request [:hadoop :owner])
+        name-node-ip (get-name-node-ip request name-node)
         defaults
         {:ndfs.block.size 134217728
          :dfs.data.dir (str data-root "/hadoop/hdfs/data")
@@ -213,7 +225,7 @@
          :dfs.permissions true
          :dfs.replication ""
          :fs.checkpoint.dir (str data-root "/hadoop/hdfs/secondary")
-         :fs.default.name (format "hdfs://%s:8020/" name-node)
+         :fs.default.name (format "hdfs://%s:8020/" name-node-ip)
          :fs.trash.interval 1440
          :hadoop.tmp.dir (str data-root (str "/tmp/hadoop" owner))
          :io.file.buffer.size 65536
