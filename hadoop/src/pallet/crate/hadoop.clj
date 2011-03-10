@@ -208,7 +208,7 @@
       (log/warn "There are more than one name-nodes"))
     (if-not name-node
       (log/error "There is no name-node defined!")
-      (compute/primary-ip name-node))))
+      (compute/private-ip name-node))))
 
 (defn get-job-tracker-ip [request name]
   (let [job-trackers (request-map/nodes-in-tag request name)
@@ -217,7 +217,7 @@
       (log/warn "There are more than one job trackers"))
     (if-not job-tracker
       (log/error "There is no job tracker defined!")
-      (compute/primary-ip job-tracker))))
+      (compute/private-ip job-tracker))))
 
 (defn configure
   [request data-root name-node-tag job-tracker-tag {:as properties}]
