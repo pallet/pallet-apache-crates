@@ -180,7 +180,7 @@
 (defn format-exports [export-map]
   (string/join
    (map (fn [[k v]]
-          (format "export %s=%s\n" k (name v)))
+          (format "export %s=%s\n" (name k) v))
         export-map)))
 
 (defn env-file
