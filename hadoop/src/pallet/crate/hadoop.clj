@@ -210,11 +210,21 @@
       (log/error "There is no name-node defined!")
       (compute/primary-ip name-node))))
 
+(defn get-job-tracker-ip [request name]
+  (let [job-trackers (request-map/nodes-in-tag request name)
+        job-tracker (first job-trackers)]
+    (when (> (count job-trackers) 1)
+      (log/warn "There are more than one job trackers"))
+    (if-not job-tracker
+      (log/error "There is no job tracker defined!")
+      (compute/primary-ip job-tracker))))
+
 (defn configure
-  [request data-root name-node job-tracker {:as properties}]
+  [request data-root name-node-tag job-tracker-tag {:as properties}]
   (let [log-dir (parameter/get-for-target request [:hadoop :log-dir])
         owner (parameter/get-for-target request [:hadoop :owner])
-        name-node-ip (get-name-node-ip request name-node)
+        name-node-ip (get-name-node-ip request name-node-tag)
+        job-tracker-ip (get-job-tracker-ip request job-tracker-tag)
         defaults
         {:ndfs.block.size 134217728
          :dfs.data.dir (str data-root "/hadoop/hdfs/data")
@@ -231,7 +241,7 @@
          :io.file.buffer.size 65536
          :mapred.child.java.opts "-Xmx550m"
          :mapred.child.ulimit 1126400
-         :mapred.job.tracker (format "%s:8021" job-tracker)
+         :mapred.job.tracker (format "%s:8021" job-tracker-ip)
          :mapred.job.tracker.handler.count 5
          :mapred.local.dir (str data-root "/hadoop/hdfs/mapred/local")
          :mapred.map.tasks.speculative.execution true
