@@ -272,7 +272,8 @@
 
 (script/defscript as-user [user & command])
 (stevedore/defimpl as-user :default [user & command]
-  (su -s "/bin/bash" ~user -c (str "JAVA_HOME=" (java-home)) ~@command))
+  (su -s "/bin/bash" ~user
+      -c "\"" (str "JAVA_HOME=" (java-home)) ~@command "\""))
 (stevedore/defimpl as-user [#{:yum}] [user & command]
   ("/sbin/runuser" -s "/bin/bash" - ~user -c ~@command))
 
