@@ -273,7 +273,7 @@
 (script/defscript as-user [user & command])
 (stevedore/defimpl as-user :default [user & command]
   (su -s "/bin/bash" ~user
-      -c "\"" (str "JAVA_HOME=" (java-home)) ~@command "\""))
+      -c "\"" (str "export JAVA_HOME=" (java-home) ";") ~@command "\""))
 (stevedore/defimpl as-user [#{:yum}] [user & command]
   ("/sbin/runuser" -s "/bin/bash" - ~user -c ~@command))
 
@@ -293,7 +293,7 @@
        ~hadoop-daemon)))))
 
 (defn- hadoop-command
-  "Run a Hadoop service"
+  "Run a Hadoop command"
   [request & args]
   (let [hadoop-home (parameter/get-for-target request [:hadoop :home])
         hadoop-user (parameter/get-for-target request [:hadoop :owner])]
@@ -309,12 +309,22 @@
 (defn name-node
   "Run a Hadoop name node"
   [request data-dir]
-  (->
-   request
-   (hadoop-service "namenode" "Name Node")
-   (hadoop-command "dfsadmin" "-safemode" "wait")
-   (hadoop-command "fs" "-mkdir" data-dir)
-   (hadoop-command "fs" "-chmod" "+w" data-dir)))
+  (let [hadoop-home (parameter/get-for-target request [:hadoop :home])
+        hadoop-user (parameter/get-for-target request [:hadoop :owner])]
+    (->
+     request
+     ;; Format FS only if it hasn't been already formated. Otherwise
+     ;; say no.
+     (exec-script/exec-script
+      (as-user ~hadoop-user
+               (pipe
+                (echo "N")
+                (~(str hadoop-home "/bin/hadoop") "namenode" "-format"))))
+     ;; start name node service
+     (hadoop-service "namenode" "Name Node")
+     (hadoop-command "dfsadmin" "-safemode" "wait")
+     (hadoop-command "fs" "-mkdir" data-dir)
+     (hadoop-command "fs" "-chmod" "+w" data-dir))))
 
 (defn secondary-name-node
   "Run a Hadoop secondary name node"
