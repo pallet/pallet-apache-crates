@@ -16,7 +16,6 @@
 
 (ns pallet.crate.hadoop
   "Install and configure hadoop.
-
    Incomplete - not yet ready for general use."
   (:require
    [pallet.parameter :as parameter]
@@ -36,12 +35,11 @@
    [clojure.string :as string]
    [clojure.contrib.logging :as log]))
 
-(def install-path "/usr/local/hadoop")
 (def log-path "/var/log/hadoop")
 (def tx-log-path (format "%s/txlog" log-path))
 (def config-path "/etc/hadoop")
 (def data-path "/var/hadoop")
-(def hadoop-home install-path)
+(def hadoop-home "/usr/local/hadoop")
 (def hadoop-user "hadoop")
 (def hadoop-group "hadoop")
 
@@ -59,7 +57,7 @@
                    version "0.20.2"}
               :as options}]
   (let [url (url version)
-        home (or home (format "%s-%s" install-path version))
+        home (or home (format "%s-%s" hadoop-home version))
         config-dir (str home "/conf")
         etc-config-dir (stevedore/script (str (config-root) "/hadoop"))
         pid-dir (stevedore/script (str (pid-root) "/hadoop"))
@@ -101,17 +99,44 @@
         (directory/directory
          (str root "/tmp") :owner owner :group group :mode "a+rwxt"))))
 
-
-(defn property->xml
-  "Create a nested sequence representing the XML for a property"
-  [property final]
-  [:property
-   (filter
-    identity
-    [[:name {} (name (key property))]
-     [:value {} (val property)]
-     (when final
-       [:final {} "true"])])])
+(defn default-properties
+  [data-root name-node-ip job-tracker-ip owner]
+  {:hadoop-site {:ndfs.block.size 134217728
+                 :dfs.data.dir (str data-root "/hadoop/hdfs/data")
+                 :dfs.datanode.du.reserved 1073741824
+                 :dfs.datanode.handler.count 3
+                 :dfs.name.dir (str data-root "/hadoop/hdfs/name")
+                 :dfs.namenode.handler.count 5
+                 :dfs.permissions true
+                 :dfs.replication ""
+                 :fs.checkpoint.dir (str data-root "/hadoop/hdfs/secondary")
+                 :fs.default.name (format "hdfs://%s:8020/" name-node-ip)
+                 :fs.trash.interval 1440
+                 :hadoop.tmp.dir (str data-root (str "/tmp/hadoop" owner))
+                 :io.file.buffer.size 65536
+                 :mapred.child.java.opts "-Xmx550m"
+                 :mapred.child.ulimit 1126400
+                 :mapred.job.tracker (format "%s:8021" job-tracker-ip)
+                 :mapred.job.tracker.handler.count 5
+                 :mapred.local.dir (str data-root "/hadoop/hdfs/mapred/local")
+                 :mapred.map.tasks.speculative.execution true
+                 :mapred.reduce.parallel.copies 10
+                 :mapred.reduce.tasks 10
+                 :mapred.reduce.tasks.speculative.execution false
+                 :mapred.submit.replication 10
+                 :mapred.system.dir (str data-root "/hadoop/hdfs/system/mapred")
+                 :mapred.tasktracker.map.tasks.maximum 2
+                 :mapred.tasktracker.reduce.tasks.maximum 1
+                 :tasktracker.http.threads 46
+                 :mapred.compress.map.output true
+                 :mapred.output.compression.type "BLOCK"
+                 :hadoop.rpc.socket.factory.class.default
+                 "org.apache.hadoop.net.StandardSocketFactory"
+                 :hadoop.rpc.socket.factory.class.ClientProtocol ""
+                 :hadoop.rpc.socket.factory.class.JobSubmissionProtocol ""
+                 :io.compression.codecs (str
+                                         "org.apache.hadoop.io.compress.DefaultCodec,"
+                                         "org.apache.hadoop.io.compress.GzipCodec")}})
 
 (def final-properties
   #{:dfs.block.size
@@ -136,10 +161,10 @@
     :hadoop.rpc.socket.factory.class.ClientProtocol
     :hadoop.rpc.socket.factory.class.JobSubmissionProtocol})
 
-
-;; from:
-;; http://nakkaya.com/2010/03/27/pretty-printing-xml-with-clojure/
-(defn ppxml [xml]
+(defn ppxml
+  "XML pretty printing, as described here:
+  http://nakkaya.com/2010/03/27/pretty-printing-xml-with-clojure/"
+  [xml]
   (let [in (javax.xml.transform.stream.StreamSource.
             (java.io.StringReader. xml))
         writer (java.io.StringWriter.)
@@ -155,6 +180,17 @@
     (.transform transformer in out)
     (-> out .getWriter .toString)))
 
+(defn property->xml
+  "Create a nested sequence representing the XML for a property"
+  [property final]
+  [:property
+   (filter
+    identity
+    [[:name {} (name (key property))]
+     [:value {} (val property)]
+     (when final
+       [:final {} "true"])])])
+
 (defn properties->xml
   [properties]
   (ppxml
@@ -166,18 +202,17 @@
         #(property->xml % (final-properties (key %)))
         properties)]))))
 
-(defn config-file
+(defn config-files
   [request properties]
-  (let [config-dir (parameter/get-for-target request [:hadoop :config-dir])
-        log-dir (parameter/get-for-target request [:hadoop :log-dir])
-        owner (parameter/get-for-target request [:hadoop :owner])
+  (let [owner (parameter/get-for-target request [:hadoop :owner])
         group (parameter/get-for-target request [:hadoop :group])]
-    (->
-     request
-     (remote-file/remote-file
-      (str config-dir "/hadoop-site.xml")
-      :content (properties->xml properties)
-      :owner owner :group group))))
+    (doseq [[filename props] properties]
+      (->
+       request
+       (remote-file/remote-file
+        (format "/%s.xml" (name filename))
+        :content (properties->xml props)
+        :owner owner :group group)))))
 
 (defn format-exports [export-map]
   (string/join
@@ -219,54 +254,34 @@
       (log/error "There is no job tracker defined!")
       (compute/private-ip job-tracker))))
 
+;; TODO -- I want to get a map back from default-properties, merge the
+;; properties in at the appropriate levels, and then pass the whole
+;; mess into "config files", without doing any destructuring.
+
+;; TODO -- better documentation here. The other option would be to
+;; 
+
+(defn merge-config
+  "Merges two configuration maps together at the second level."
+  [default-props new-props]
+  (apply conj
+         (for [[name props] default-props]
+           {name (merge props (name new-props))})))
+
 (defn configure
   [request data-root name-node-tag job-tracker-tag {:as properties}]
   (let [log-dir (parameter/get-for-target request [:hadoop :log-dir])
         owner (parameter/get-for-target request [:hadoop :owner])
         name-node-ip (get-name-node-ip request name-node-tag)
         job-tracker-ip (get-job-tracker-ip request job-tracker-tag)
-        defaults
-        {:ndfs.block.size 134217728
-         :dfs.data.dir (str data-root "/hadoop/hdfs/data")
-         :dfs.datanode.du.reserved 1073741824
-         :dfs.datanode.handler.count 3
-         :dfs.name.dir (str data-root "/hadoop/hdfs/name")
-         :dfs.namenode.handler.count 5
-         :dfs.permissions true
-         :dfs.replication ""
-         :fs.checkpoint.dir (str data-root "/hadoop/hdfs/secondary")
-         :fs.default.name (format "hdfs://%s:8020/" name-node-ip)
-         :fs.trash.interval 1440
-         :hadoop.tmp.dir (str data-root (str "/tmp/hadoop" owner))
-         :io.file.buffer.size 65536
-         :mapred.child.java.opts "-Xmx550m"
-         :mapred.child.ulimit 1126400
-         :mapred.job.tracker (format "%s:8021" job-tracker-ip)
-         :mapred.job.tracker.handler.count 5
-         :mapred.local.dir (str data-root "/hadoop/hdfs/mapred/local")
-         :mapred.map.tasks.speculative.execution true
-         :mapred.reduce.parallel.copies 10
-         :mapred.reduce.tasks 10
-         :mapred.reduce.tasks.speculative.execution false
-         :mapred.submit.replication 10
-         :mapred.system.dir (str data-root "/hadoop/hdfs/system/mapred")
-         :mapred.tasktracker.map.tasks.maximum 2
-         :mapred.tasktracker.reduce.tasks.maximum 1
-         :tasktracker.http.threads 46
-         :mapred.compress.map.output true
-         :mapred.output.compression.type "BLOCK"
-         :hadoop.rpc.socket.factory.class.default
-         "org.apache.hadoop.net.StandardSocketFactory"
-         :hadoop.rpc.socket.factory.class.ClientProtocol ""
-         :hadoop.rpc.socket.factory.class.JobSubmissionProtocol ""
-         :io.compression.codecs (str
-                                 "org.apache.hadoop.io.compress.DefaultCodec,"
-                                 "org.apache.hadoop.io.compress.GzipCodec")}
-        properties (merge defaults properties)]
+        defaults  (default-properties
+                    data-root name-node-ip
+                    job-tracker-ip owner)
+        properties (merge-config defaults properties)]
     (->
      request
      (hadoop-filesystem-dirs data-root)
-     (config-file properties)
+     (config-files properties)
      env-file
      (file/symbolic-link (str data-root "/hadoop/logs") log-dir))))
 
@@ -313,7 +328,7 @@
         hadoop-user (parameter/get-for-target request [:hadoop :owner])]
     (->
      request
-     ;; Format FS only if it hasn't been already formated. Otherwise
+     ;; Format FS only if it hasn't been already formatted. Otherwise
      ;; say no.
      (exec-script/exec-script
       (as-user ~hadoop-user
@@ -337,17 +352,14 @@
   (-> request
       (hadoop-service "jobtracker" "job tracker")
       #_(parameter/assoc-for-service
-       [:hadoop :mapred :job-tracker]
-       (format "%s:8021" (request-map/target-ip)))))
+         [:hadoop :mapred :job-tracker]
+         (format "%s:8021" (request-map/target-ip)))))
 
 (defn data-node
   "Run a Hadoop data node"
   [request]
   (-> request
-      (hadoop-service "datanode" "data node")
-      (parameter/assoc-for-service
-       [:hadoop :fs :default-name]
-       (format "hdfs://%s:8020" (request-map/target-ip)))))
+      (hadoop-service "datanode" "data node")))
 
 (defn task-tracker
   "Run a Hadoop task tracker"
