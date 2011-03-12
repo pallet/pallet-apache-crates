@@ -264,7 +264,7 @@
 (defn merge-config
   "Merges two configuration maps together at the second level."
   [default-props new-props]
-  (apply conj
+  (apply merge
          (for [[name props] default-props]
            {name (merge props (name new-props))})))
 
