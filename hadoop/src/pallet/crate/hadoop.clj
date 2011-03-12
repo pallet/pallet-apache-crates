@@ -43,14 +43,16 @@
 (def hadoop-user "hadoop")
 (def hadoop-group "hadoop")
 
-(defn url "Download url"
+(defn url
+  "Download URL for the Apache distribution of Hadoop, generated for
+  the supplied version."
   [version]
   (format
    "http://www.apache.org/dist/hadoop/core/hadoop-%s/hadoop-%s.tar.gz"
    version version))
 
 (defn install
-  "Install Hadoop"
+  "Initial hadoop installation."
   [request & {:keys [user group version home]
               :or {user hadoop-user
                    group hadoop-group
@@ -100,43 +102,42 @@
          (str root "/tmp") :owner owner :group group :mode "a+rwxt"))))
 
 (defn default-properties
+  "Returns a nested map of default properties, named according to the
+  0.20 api."
   [data-root name-node-ip job-tracker-ip owner]
-  {:hadoop-site {:ndfs.block.size 134217728
-                 :dfs.data.dir (str data-root "/hadoop/hdfs/data")
-                 :dfs.datanode.du.reserved 1073741824
-                 :dfs.datanode.handler.count 3
-                 :dfs.name.dir (str data-root "/hadoop/hdfs/name")
-                 :dfs.namenode.handler.count 5
-                 :dfs.permissions true
-                 :dfs.replication ""
-                 :fs.checkpoint.dir (str data-root "/hadoop/hdfs/secondary")
-                 :fs.default.name (format "hdfs://%s:8020/" name-node-ip)
-                 :fs.trash.interval 1440
-                 :hadoop.tmp.dir (str data-root (str "/tmp/hadoop" owner))
-                 :io.file.buffer.size 65536
+  {:hdfs-site {:dfs.data.dir (str data-root "/hadoop/hdfs/data")
+               :dfs.datanode.du.reserved 1073741824
+               :dfs.name.dir (str data-root "/hadoop/hdfs/name")
+               :dfs.namenode.handler.count 10
+               :dfs.permissions.enabled true
+               :dfs.replication 3}
+   :mapred-site {:tasktracker.http.threads 46
                  :mapred.child.java.opts "-Xmx550m"
                  :mapred.child.ulimit 1126400
                  :mapred.job.tracker (format "%s:8021" job-tracker-ip)
-                 :mapred.job.tracker.handler.count 5
+                 :mapred.job.tracker.handler.count 10
                  :mapred.local.dir (str data-root "/hadoop/hdfs/mapred/local")
                  :mapred.map.tasks.speculative.execution true
+                 :mapred.reduce.tasks.speculative.execution false
                  :mapred.reduce.parallel.copies 10
                  :mapred.reduce.tasks 10
-                 :mapred.reduce.tasks.speculative.execution false
                  :mapred.submit.replication 10
                  :mapred.system.dir (str data-root "/hadoop/hdfs/system/mapred")
                  :mapred.tasktracker.map.tasks.maximum 2
                  :mapred.tasktracker.reduce.tasks.maximum 1
-                 :tasktracker.http.threads 46
                  :mapred.compress.map.output true
-                 :mapred.output.compression.type "BLOCK"
-                 :hadoop.rpc.socket.factory.class.default
-                 "org.apache.hadoop.net.StandardSocketFactory"
-                 :hadoop.rpc.socket.factory.class.ClientProtocol ""
-                 :hadoop.rpc.socket.factory.class.JobSubmissionProtocol ""
-                 :io.compression.codecs (str
-                                         "org.apache.hadoop.io.compress.DefaultCodec,"
-                                         "org.apache.hadoop.io.compress.GzipCodec")}})
+                 :mapred.output.compression.type "BLOCK"}
+   :core-site {:fs.checkpoint.dir (str data-root "/hadoop/hdfs/secondary")
+               :fs.default.name (format "hdfs://%s:8020/" name-node-ip)
+               :fs.trash.interval 1440
+               :io.file.buffer.size 65536
+               :hadoop.tmp.dir (str data-root (str "/tmp/hadoop" owner))
+               :hadoop.rpc.socket.factory.class.default "org.apache.hadoop.net.StandardSocketFactory"
+               :hadoop.rpc.socket.factory.class.ClientProtocol ""
+               :hadoop.rpc.socket.factory.class.JobSubmissionProtocol ""
+               :io.compression.codecs (str
+                                       "org.apache.hadoop.io.compress.DefaultCodec,"
+                                       "org.apache.hadoop.io.compress.GzipCodec")}})
 
 (def final-properties
   #{:dfs.block.size
@@ -162,7 +163,7 @@
     :hadoop.rpc.socket.factory.class.JobSubmissionProtocol})
 
 (defn ppxml
-  "XML pretty printing, as described here:
+  "XML pretty printing, as described at
   http://nakkaya.com/2010/03/27/pretty-printing-xml-with-clojure/"
   [xml]
   (let [in (javax.xml.transform.stream.StreamSource.
@@ -181,7 +182,7 @@
     (-> out .getWriter .toString)))
 
 (defn property->xml
-  "Create a nested sequence representing the XML for a property"
+  "Create a nested sequence representing the XML for a property."
   [property final]
   [:property
    (filter
@@ -214,6 +215,15 @@
         :content (properties->xml props)
         :owner owner :group group)))))
 
+(defn merge-config
+  "Takes a map of Hadoop configuration options and merges in the
+  supplied map of custom configuration options."
+  [default-props
+  new-props]
+  (apply merge
+         (for [[name props] default-props]
+           {name (merge props (name new-props))})))
+
 (defn format-exports [export-map]
   (string/join
    (map (fn [[k v]]
@@ -236,47 +246,27 @@
         :HADOOP_OPTS "\"-Djava.net.preferIPv4Stack=true\""
         :HADOOP_LOG_DIR (str log-dir "/logs")})))))
 
-(defn get-name-node-ip [request name]
-  (let [name-nodes (request-map/nodes-in-tag request name)
-        name-node (first name-nodes)]
-    (when (> (count name-nodes) 1)
-      (log/warn "There are more than one name-nodes"))
-    (if-not name-node
-      (log/error "There is no name-node defined!")
+(defn get-master-ip
+  "Returns the private IP address of a particular type of master node,
+  as defined by tag. Logs a warning if more than one master exists."
+  [request tag]
+  (let [[master :as nodes] (request-map/nodes-in-tag request name)
+        kind (name tag)]
+    (when (> (count nodes) 1)
+      (log/warn (format "There are more than one %s" kind)))
+    (if-not master
+      (log/error (format "There is no %s defined!" kind))
       (compute/private-ip name-node))))
 
-(defn get-job-tracker-ip [request name]
-  (let [job-trackers (request-map/nodes-in-tag request name)
-        job-tracker (first job-trackers)]
-    (when (> (count job-trackers) 1)
-      (log/warn "There are more than one job trackers"))
-    (if-not job-tracker
-      (log/error "There is no job tracker defined!")
-      (compute/private-ip job-tracker))))
-
-;; TODO -- I want to get a map back from default-properties, merge the
-;; properties in at the appropriate levels, and then pass the whole
-;; mess into "config files", without doing any destructuring.
-
-;; TODO -- better documentation here. The other option would be to
-;; 
-
-(defn merge-config
-  "Merges two configuration maps together at the second level."
-  [default-props new-props]
-  (apply merge
-         (for [[name props] default-props]
-           {name (merge props (name new-props))})))
-
 (defn configure
+  "Configure Hadoop cluster, with custom properties."
   [request data-root name-node-tag job-tracker-tag {:as properties}]
   (let [log-dir (parameter/get-for-target request [:hadoop :log-dir])
         owner (parameter/get-for-target request [:hadoop :owner])
-        name-node-ip (get-name-node-ip request name-node-tag)
-        job-tracker-ip (get-job-tracker-ip request job-tracker-tag)
+        name-node-ip (get-master-ip request name-node-tag)
+        job-tracker-ip (get-master-ip request job-tracker-tag)
         defaults  (default-properties
-                    data-root name-node-ip
-                    job-tracker-ip owner)
+                    data-root name-node-ip job-tracker-ip owner)
         properties (merge-config defaults properties)]
     (->
      request
@@ -300,7 +290,7 @@
     (->
      request
      (exec-script/exec-checked-script
-      (format "Start Hadoop %s" description)
+      (str "Start Hadoop " description)
       (as-user
        ~hadoop-user
        ~(str hadoop-home "/bin/hadoop-daemon.sh")
@@ -315,7 +305,7 @@
     (->
      request
      (exec-script/exec-checked-script
-      (format "hadoop %s" args)
+      (str "hadoop " args)
       (as-user
        ~hadoop-user
        ~(str hadoop-home "/bin/hadoop")
