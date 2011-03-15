@@ -17,6 +17,8 @@
 (ns pallet.crate.hadoop
   "Install and configure hadoop.
    Incomplete - not yet ready for general use."
+  (:use
+   [pallet.resource :only (phase)])
   (:require
    [pallet.parameter :as parameter]
    [pallet.stevedore :as stevedore]
@@ -205,21 +207,21 @@
 
 (defn config-files
   [request properties]
-  (let [owner (parameter/get-for-target request [:hadoop :owner])
+  (let [config-dir (parameter/get-for-target request [:hadoop :config-dir])
+        owner (parameter/get-for-target request [:hadoop :owner])
         group (parameter/get-for-target request [:hadoop :group])]
-    (doseq [[filename props] properties]
-      (->
-       request
-       (remote-file/remote-file
-        (format "/%s.xml" (name filename))
-        :content (properties->xml props)
-        :owner owner :group group)))))
+    ((apply comp (for [[filename props] properties]
+                   (phase
+                    (remote-file/remote-file
+                     (format "%s/%s.xml" config-dir (name filename))
+                     :content (properties->xml props)
+                     :owner owner :group group))))
+     request)))
 
 (defn merge-config
   "Takes a map of Hadoop configuration options and merges in the
   supplied map of custom configuration options."
-  [default-props
-  new-props]
+  [default-props new-props]
   (apply merge
          (for [[name props] default-props]
            {name (merge props (name new-props))})))
@@ -250,13 +252,13 @@
   "Returns the private IP address of a particular type of master node,
   as defined by tag. Logs a warning if more than one master exists."
   [request tag]
-  (let [[master :as nodes] (request-map/nodes-in-tag request name)
+  (let [[master :as nodes] (request-map/nodes-in-tag request tag)
         kind (name tag)]
     (when (> (count nodes) 1)
       (log/warn (format "There are more than one %s" kind)))
     (if-not master
       (log/error (format "There is no %s defined!" kind))
-      (compute/private-ip name-node))))
+      (compute/private-ip master))))
 
 (defn configure
   "Configure Hadoop cluster, with custom properties."
