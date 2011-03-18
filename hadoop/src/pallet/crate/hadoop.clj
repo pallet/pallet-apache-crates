@@ -231,9 +231,8 @@ INCOMPLETE - not yet ready for general use."
 
 (defn format-exports [export-map]
   (string/join
-   (map (fn [[k v]]
-          (format "export %s=%s\n" (name k) v))
-        export-map)))
+   (for [[k v] export-map]
+     (format "export %s=%s\n" (name k) v))))
 
 (defn env-file
   [request]
@@ -252,24 +251,28 @@ INCOMPLETE - not yet ready for general use."
         :HADOOP_LOG_DIR (str log-dir "/logs")})))))
 
 (defn get-master-ip
-  "Returns the private IP address of a particular type of master node,
-  as defined by tag. Logs a warning if more than one master exists."
-  [request tag]
+  "Returns the IP address of a particular type of master node,
+  as defined by tag. IP-type can be :private or :public. Logs a
+  warning if more than one master exists."
+  [request ip-type tag]
   (let [[master :as nodes] (request-map/nodes-in-tag request tag)
         kind (name tag)]
     (when (> (count nodes) 1)
       (log/warn (format "There are more than one %s" kind)))
     (if-not master
       (log/error (format "There is no %s defined!" kind))
-      (compute/private-ip master))))
+      ((case ip-type
+             :private compute/private-ip
+             :public compute/primary-ip)
+       master))))
 
 (defn configure
   "Configure Hadoop cluster, with custom properties."
-  [request data-root name-node-tag job-tracker-tag {:as properties}]
+  [request data-root name-node-tag job-tracker-tag ip-type {:as properties}]
   (let [log-dir (parameter/get-for-target request [:hadoop :log-dir])
         owner (parameter/get-for-target request [:hadoop :owner])
-        name-node-ip (get-master-ip request name-node-tag)
-        job-tracker-ip (get-master-ip request job-tracker-tag)
+        name-node-ip (get-master-ip request ip-type name-node-tag)
+        job-tracker-ip (get-master-ip request ip-type job-tracker-tag)
         defaults  (default-properties
                     data-root name-node-ip job-tracker-ip owner)
         properties (merge-config defaults properties)]
@@ -303,14 +306,15 @@ INCOMPLETE - not yet ready for general use."
        ~hadoop-daemon)))))
 
 (defn- hadoop-command
-  "Runs '$ hadoop ...' on the "
+  "Runs '$ hadoop ...' on each machine in the request. Command runs
+  has the hadoop user."
   [request & args]
   (let [hadoop-home (parameter/get-for-target request [:hadoop :home])
         hadoop-user (parameter/get-for-target request [:hadoop :owner])]
     (->
      request
      (exec-script/exec-checked-script
-      (str "hadoop " args)
+      (apply str "hadoop " (interpose " " args))
       (as-user
        ~hadoop-user
        ~(str hadoop-home "/bin/hadoop")
