@@ -1,23 +1,23 @@
-; -*- Mode: Clojure; indent-tabs-mode: nil -*-
-
-; Licensed to the Apache Software Foundation (ASF) under one
-; or more contributor license agreements.  See the NOTICE file
-; distributed with this work for additional information
-; regarding copyright ownership.  The ASF licenses this file
-; to you under the Apache License, Version 2.0 (the
-; "License"); you may not use this file except in compliance
-; with the License.  You may obtain a copy of the License at
-;     http://www.apache.org/licenses/LICENSE-2.0
-; Unless required by applicable law or agreed to in writing, software
-; distributed under the License is distributed on an "AS IS" BASIS,
-; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-; See the License for the specific language governing permissions and
-; limitations under the License.
+;; -*- Mode: Clojure; indent-tabs-mode: nil -*-
+;;
+;; Licensed to the Apache Software Foundation (ASF) under one or more
+;; contributor license agreements.  See the NOTICE file distributed
+;; with this work for additional information regarding copyright
+;; ownership.  The ASF licenses this file to you under the Apache
+;; License, Version 2.0 (the "License"); you may not use this file
+;; except in compliance with the License.  You may obtain a copy of the
+;; License at http://www.apache.org/licenses/LICENSE-2.0 Unless
+;; required by applicable law or agreed to in writing, software
+;; distributed under the License is distributed on an "AS IS" BASIS,
+;; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+;; implied.  See the License for the specific language governing
+;; permissions and limitations under the License.
 
 (ns pallet.crate.hadoop
-  "Install and configure hadoop.
-   Incomplete - not yet ready for general use."
+  "Pallet crate to manage Hadoop installation and configuration.
+INCOMPLETE - not yet ready for general use."
   (:use
+   [pallet.thread-expr :only (for->)]
    [pallet.resource :only (phase)])
   (:require
    [pallet.parameter :as parameter]
@@ -30,12 +30,17 @@
    [pallet.resource.remote-directory :as remote-directory]
    [pallet.resource.remote-file :as remote-file]
    [pallet.resource.user :as user]
-   [pallet.resource.filesystem-layout :as filesystem-layout]
    [pallet.script :as script]
    [pallet.crate.java :as java]
    [clojure.contrib.prxml :as prxml]
    [clojure.string :as string]
    [clojure.contrib.logging :as log]))
+
+;; This crate contains all information required to set up and
+;; configure a fully functional installation of Apache's
+;; Hadoop. Working through this crate, you might find Michael
+;; G. Noll's [single node](http://goo.gl/8ogSk) and [multiple
+;; node](http://goo.gl/NIWoK) hadoop cluster tutorials to be helpful.
 
 (def log-path "/var/log/hadoop")
 (def tx-log-path (format "%s/txlog" log-path))
@@ -84,14 +89,12 @@
       :url url :md5-url (str url ".md5")
       :unpack :tar :tar-options "xz"
       :owner user :group group)
-     (directory/directory log-path :owner user :group group :mode "0755")
-     (directory/directory config-dir :owner user :group group :mode "0755")
-     (directory/directory data-dir :owner user :group group :mode "0755")
-     (directory/directory pid-dir :owner user :group group :mode "0755")
-     (directory/directory log-dir :owner user :group group :mode "0755")
+     (for-> [path [log-path config-dir data-dir pid-dir log-dir]]
+            (directory/directory path :owner user :group group :mode "0755"))
      (file/symbolic-link config-dir etc-config-dir))))
 
 (defn hadoop-filesystem-dirs
+  ""
   [request root]
   (let [owner (parameter/get-for-target request [:hadoop :owner])
         group (parameter/get-for-target request [:hadoop :group])]
@@ -210,13 +213,13 @@
   (let [config-dir (parameter/get-for-target request [:hadoop :config-dir])
         owner (parameter/get-for-target request [:hadoop :owner])
         group (parameter/get-for-target request [:hadoop :group])]
-    ((apply comp (for [[filename props] properties]
-                   (phase
-                    (remote-file/remote-file
-                     (format "%s/%s.xml" config-dir (name filename))
-                     :content (properties->xml props)
-                     :owner owner :group group))))
-     request)))
+    (->
+     request
+     (for-> [[filename props] properties]
+            (remote-file/remote-file
+             (format "%s/%s.xml" config-dir (name filename))
+             :content (properties->xml props)
+             :owner owner :group group)))))
 
 (defn merge-config
   "Takes a map of Hadoop configuration options and merges in the
@@ -280,7 +283,7 @@
 (script/defscript as-user [user & command])
 (stevedore/defimpl as-user :default [user & command]
   (su -s "/bin/bash" ~user
-      -c "\"" (str "export JAVA_HOME=" (java-home) ";") ~@command "\""))
+      -c "\"" (format "export JAVA_HOME=%s;" (java-home)) ~@command "\""))
 (stevedore/defimpl as-user [#{:yum}] [user & command]
   ("/sbin/runuser" -s "/bin/bash" - ~user -c ~@command))
 
@@ -300,7 +303,7 @@
        ~hadoop-daemon)))))
 
 (defn- hadoop-command
-  "Run a Hadoop command"
+  "Runs '$ hadoop ...' on the "
   [request & args]
   (let [hadoop-home (parameter/get-for-target request [:hadoop :home])
         hadoop-user (parameter/get-for-target request [:hadoop :owner])]
@@ -313,21 +316,28 @@
        ~(str hadoop-home "/bin/hadoop")
        ~@args)))))
 
+(defn format-hdfs
+  "Formats HDFS for the first time. If HDFS has already been
+  formatted, does nothing."
+  [request]
+  (let [hadoop-home (parameter/get-for-target request [:hadoop :home])
+        hadoop-user (parameter/get-for-target request [:hadoop :owner])]
+    (->
+     request
+     (exec-script/exec-script
+      (as-user ~hadoop-user
+               (pipe
+                (echo "N")
+                (~(str hadoop-home "/bin/hadoop") "namenode" "-format")))))))
+
 (defn name-node
-  "Run a Hadoop name node"
+  "Run a Hadoop name node."
   [request data-dir]
   (let [hadoop-home (parameter/get-for-target request [:hadoop :home])
         hadoop-user (parameter/get-for-target request [:hadoop :owner])]
     (->
      request
-     ;; Format FS only if it hasn't been already formatted. Otherwise
-     ;; say no.
-     (exec-script/exec-script
-      (as-user ~hadoop-user
-               (pipe
-                (echo "N")
-                (~(str hadoop-home "/bin/hadoop") "namenode" "-format"))))
-     ;; start name node service
+     (format-hdfs)
      (hadoop-service "namenode" "Name Node")
      (hadoop-command "dfsadmin" "-safemode" "wait")
      (hadoop-command "fs" "-mkdir" data-dir)
@@ -342,10 +352,7 @@
   "Run a Hadoop job tracker"
   [request]
   (-> request
-      (hadoop-service "jobtracker" "job tracker")
-      #_(parameter/assoc-for-service
-         [:hadoop :mapred :job-tracker]
-         (format "%s:8021" (request-map/target-ip)))))
+      (hadoop-service "jobtracker" "job tracker")))
 
 (defn data-node
   "Run a Hadoop data node"
