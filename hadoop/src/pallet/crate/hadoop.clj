@@ -304,10 +304,9 @@ INCOMPLETE - not yet ready for general use."
           (stevedore/script
            (if-not (pipe (jps)
                          (grep "-i" ~hadoop-daemon))
-             ~(str hadoop-home
-                   "/bin/hadoop-daemon.sh"
-                   " start "
-                   hadoop-daemon)))))))))
+             ((str ~hadoop-home "/bin/hadoop-daemon.sh")
+              "start"
+              ~hadoop-daemon)))))))))
 
 (defn- hadoop-command
   "Runs '$ hadoop ...' on each machine in the request. Command runs
@@ -359,14 +358,12 @@ INCOMPLETE - not yet ready for general use."
 (defn job-tracker
   "Run a Hadoop job tracker"
   [request]
-  (-> request
-      (hadoop-service "jobtracker" "job tracker")))
+  (hadoop-service request "jobtracker" "job tracker"))
 
 (defn data-node
   "Run a Hadoop data node"
   [request]
-  (-> request
-      (hadoop-service "datanode" "data node")))
+  (hadoop-service request "datanode" "data node"))
 
 (defn task-tracker
   "Run a Hadoop task tracker"
