@@ -16,25 +16,24 @@
 (ns pallet.crate.hadoop
   "Pallet crate to manage Hadoop installation and configuration.
 INCOMPLETE - not yet ready for general use."
-  (:use
-   [pallet.thread-expr :only (for->)]
-   [pallet.resource :only (phase)])
-  (:require
-   [pallet.parameter :as parameter]
-   [pallet.stevedore :as stevedore]
-   [pallet.compute :as compute]
-   [pallet.request-map :as request-map]
-   [pallet.resource.directory :as directory]
-   [pallet.resource.exec-script :as exec-script]
-   [pallet.resource.file :as file]
-   [pallet.resource.remote-directory :as remote-directory]
-   [pallet.resource.remote-file :as remote-file]
-   [pallet.resource.user :as user]
-   [pallet.script :as script]
-   [pallet.crate.java :as java]
-   [clojure.contrib.prxml :as prxml]
-   [clojure.string :as string]
-   [clojure.contrib.logging :as log]))
+  (:use [pallet.thread-expr :only (for->)]
+        [pallet.resource :only (phase)])
+  (:require [pallet.parameter :as parameter]
+            [pallet.stevedore :as stevedore]
+            [pallet.compute :as compute]
+            [pallet.request-map :as request-map]
+            [pallet.resource.directory :as directory]
+            [pallet.resource.exec-script :as exec-script]
+            [pallet.resource.file :as file]
+            [pallet.resource.remote-directory :as remote-directory]
+            [pallet.resource.remote-file :as remote-file]
+            [pallet.resource.user :as user]
+            [pallet.script :as script]
+            [pallet.crate.java :as java]
+            [clojure.contrib.prxml :as prxml]
+            [clojure.string :as string]
+            [clojure.contrib.logging :as log])
+  (:import [sun.tools.jps Jps]))
 
 ;; This crate contains all information required to set up and
 ;; configure a fully functional installation of Apache's
@@ -286,7 +285,7 @@ INCOMPLETE - not yet ready for general use."
 (script/defscript as-user [user & command])
 (stevedore/defimpl as-user :default [user & command]
   (su -s "/bin/bash" ~user
-      -c "\"" (format "export JAVA_HOME=%s;" (java-home)) ~@command "\""))
+      -c "\"" (str "export JAVA_HOME=" (java-home) ";") ~@command "\""))
 (stevedore/defimpl as-user [#{:yum}] [user & command]
   ("/sbin/runuser" -s "/bin/bash" - ~user -c ~@command))
 
@@ -301,9 +300,14 @@ INCOMPLETE - not yet ready for general use."
       (str "Start Hadoop " description)
       (as-user
        ~hadoop-user
-       ~(str hadoop-home "/bin/hadoop-daemon.sh")
-       "start"
-       ~hadoop-daemon)))))
+       ~(script/with-template [:ubuntu]
+          (stevedore/script
+           (if-not (pipe (jps)
+                         (grep "-i" ~hadoop-daemon))
+             ~(str hadoop-home
+                   "/bin/hadoop-daemon.sh"
+                   " start "
+                   hadoop-daemon)))))))))
 
 (defn- hadoop-command
   "Runs '$ hadoop ...' on each machine in the request. Command runs
