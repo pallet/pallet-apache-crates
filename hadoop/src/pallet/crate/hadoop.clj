@@ -268,13 +268,13 @@ INCOMPLETE - not yet ready for general use."
 (defn configure
   "Configure Hadoop cluster, with custom properties."
   [request data-root name-node-tag job-tracker-tag ip-type {:as properties}]
-  (let [log-dir (parameter/get-for-target request [:hadoop :log-dir])
-        owner (parameter/get-for-target request [:hadoop :owner])
-        name-node-ip (get-master-ip request ip-type name-node-tag)
+  (let [name-node-ip (get-master-ip request ip-type name-node-tag)
         job-tracker-ip (get-master-ip request ip-type job-tracker-tag)
+        owner (parameter/get-for-target request [:hadoop :owner])
         defaults  (default-properties
                     data-root name-node-ip job-tracker-ip owner)
-        properties (merge-config defaults properties)]
+        properties (merge-config defaults properties)
+        log-dir (parameter/get-for-target request [:hadoop :log-dir])]
     (->
      request
      (hadoop-filesystem-dirs data-root)
@@ -300,13 +300,12 @@ INCOMPLETE - not yet ready for general use."
       (str "Start Hadoop " description)
       (as-user
        ~hadoop-user
-       ~(script/with-template [:ubuntu]
-          (stevedore/script
-           (if-not (pipe (jps)
-                         (grep "-i" ~hadoop-daemon))
-             ((str ~hadoop-home "/bin/hadoop-daemon.sh")
-              "start"
-              ~hadoop-daemon)))))))))
+       ~(stevedore/script
+         (if-not (pipe (jps)
+                       (grep "-i" ~hadoop-daemon))
+           ((str ~hadoop-home "/bin/hadoop-daemon.sh")
+            "start"
+            ~hadoop-daemon))))))))
 
 (defn- hadoop-command
   "Runs '$ hadoop ...' on each machine in the request. Command runs
@@ -320,7 +319,7 @@ INCOMPLETE - not yet ready for general use."
       (apply str "hadoop " (interpose " " args))
       (as-user
        ~hadoop-user
-       ~(str hadoop-home "/bin/hadoop")
+       (str ~hadoop-home "/bin/hadoop")
        ~@args)))))
 
 (defn format-hdfs
@@ -335,20 +334,20 @@ INCOMPLETE - not yet ready for general use."
       (as-user ~hadoop-user
                (pipe
                 (echo "N")
-                (~(str hadoop-home "/bin/hadoop") "namenode" "-format")))))))
+                ((str ~hadoop-home "/bin/hadoop")
+                 "namenode"
+                 "-format")))))))
 
 (defn name-node
   "Run a Hadoop name node."
   [request data-dir]
-  (let [hadoop-home (parameter/get-for-target request [:hadoop :home])
-        hadoop-user (parameter/get-for-target request [:hadoop :owner])]
-    (->
-     request
-     (format-hdfs)
-     (hadoop-service "namenode" "Name Node")
-     (hadoop-command "dfsadmin" "-safemode" "wait")
-     (hadoop-command "fs" "-mkdir" data-dir)
-     (hadoop-command "fs" "-chmod" "+w" data-dir))))
+  (->
+   request
+   (format-hdfs)
+   (hadoop-service "namenode" "Name Node")
+   (hadoop-command "dfsadmin" "-safemode" "wait")
+   (hadoop-command "fs" "-mkdir" data-dir)
+   (hadoop-command "fs" "-chmod" "+w" data-dir)))
 
 (defn secondary-name-node
   "Run a Hadoop secondary name node"
