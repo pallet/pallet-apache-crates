@@ -61,6 +61,35 @@ INCOMPLETE - not yet ready for general use."
    "http://www.apache.org/dist/hadoop/core/hadoop-%s/hadoop-%s.tar.gz"
    version version))
 
+(defn format-exports
+  "Formats `export` lines for inclusion in a shell script."
+  [& kv-pairs]
+  (string/join
+   (for [[k v] (partition 2 kv-pairs)]
+     (format "export %s=%s\n" (name k) v))))
+
+(defn create-hadoop-user
+  "Create the hadoop user"
+  [request]
+  (let [user (parameter/get-for-target request [:hadoop :owner])
+        group (parameter/get-for-target request [:hadoop :group])
+        hadoop-home (parameter/get-for-target request [:hadoop :home])
+        jdk-home (stevedore/script (java/java-home))]
+    (-> request
+        (user/group group :system true)
+        (user/user user
+                   :system true
+                   :create-home true
+                   :shell :bash)
+        (remote-file/remote-file
+         (str "/home/" user "/.bash_profile")
+         :owner user
+         :group group
+         :literal true
+         :content
+         (format-exports :JAVA_HOME jdk-home
+                         :PATH (format "$PATH:%s" (str hadoop-home "/bin")))))))
+
 (defn install
   "Initial hadoop installation."
   [request & {:keys [user group version home]
@@ -86,20 +115,14 @@ INCOMPLETE - not yet ready for general use."
       [:hadoop :data-dir] data-dir
       [:hadoop :pid-dir] pid-dir
       [:hadoop :log-dir] log-dir)
-     (user/user user :system true)
-     (user/group group :system true)
-     (remote-directory/remote-directory home
-                                        :url url
-                                        :md5-url (str url ".md5")
-                                        :unpack :tar
-                                        :tar-options "xz"
-                                        :owner user
-                                        :group group)
-     (for-> [path [config-dir data-dir pid-dir log-dir]]
-            (directory/directory path
-                                 :owner user
-                                 :group group
-                                 :mode "0755"))
+     (create-hadoop-user)
+     (remote-directory/remote-directory
+      home
+      :url url :md5-url (str url ".md5")
+      :unpack :tar :tar-options "xz"
+      :owner user :group group)
+     (for-> [path [log-path config-dir data-dir pid-dir log-dir]]
+            (directory/directory path :owner user :group group :mode "0755"))
      (file/symbolic-link config-dir etc-config-dir))))
 
 (defn hadoop-param
@@ -244,13 +267,6 @@ INCOMPLETE - not yet ready for general use."
   (apply merge
          (for [[name props] default-props]
            {name (merge props (name new-props))})))
-
-(defn format-exports
-  "Formats `export` lines for inclusion in a shell script."
-  [& kv-pairs]
-  (string/join
-   (for [[k v] (partition 2 kv-pairs)]
-     (format "export %s=%s\n" (name k) v))))
 
 (defn env-file
   [request]
