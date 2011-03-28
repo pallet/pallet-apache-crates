@@ -13,6 +13,14 @@
 ;; implied.  See the License for the specific language governing
 ;; permissions and limitations under the License.
 
+;; http://www.michael-noll.com/tutorials/running-hadoop-on-ubuntu-linux-multi-node-cluster/
+;; http://wiki.apache.org/hadoop/GettingStartedWithHadoop
+;; http://www.michael-noll.com/tutorials/running-hadoop-on-ubuntu-linux-single-node-cluster
+;; http://hadoop.apache.org/mapreduce/docs/current/mapred-default.html
+;; http://hadoop.apache.org/hdfs/docs/current/hdfs-default.html
+;; http://hadoop.apache.org/common/docs/current/cluster_setup.html#core-site.xml
+;; http://hadoop.apache.org/#What+Is+Hadoop%3F
+
 (ns pallet.crate.hadoop
   "Pallet crate to manage Hadoop installation and configuration.
 INCOMPLETE - not yet ready for general use."
@@ -32,8 +40,7 @@ INCOMPLETE - not yet ready for general use."
             [pallet.crate.java :as java]
             [clojure.contrib.prxml :as prxml]
             [clojure.string :as string]
-            [clojure.contrib.logging :as log])
-  (:import [sun.tools.jps Jps]))
+            [clojure.contrib.logging :as log]))
 
 ;; This crate contains all information required to set up and
 ;; configure a fully functional installation of Apache's
@@ -41,13 +48,10 @@ INCOMPLETE - not yet ready for general use."
 ;; G. Noll's [single node](http://goo.gl/8ogSk) and [multiple
 ;; node](http://goo.gl/NIWoK) hadoop cluster tutorials to be helpful.
 
-(def log-path "/var/log/hadoop")
-(def tx-log-path (format "%s/txlog" log-path))
-(def config-path "/etc/hadoop")
-(def data-path "/var/hadoop")
-(def hadoop-home "/usr/local/hadoop")
-(def hadoop-user "hadoop")
-(def hadoop-group "hadoop")
+(def default-home "/usr/local/hadoop")
+(def default-user "hadoop")
+(def default-group "hadoop")
+(def default-version "0.20.2")
 
 (defn url
   "Download URL for the Apache distribution of Hadoop, generated for
@@ -60,13 +64,13 @@ INCOMPLETE - not yet ready for general use."
 (defn install
   "Initial hadoop installation."
   [request & {:keys [user group version home]
-              :or {user hadoop-user
-                   group hadoop-group
-                   version "0.20.2"}
-              :as options}]
+              :or {user default-user
+                   group default-group
+                   version default-version}}]
   (let [url (url version)
-        home (or home (format "%s-%s" hadoop-home version))
+        home (or home (format "%s-%s" default-home version))
         config-dir (str home "/conf")
+        user-dir (stevedore/script (user/user-home ~user))
         etc-config-dir (stevedore/script (str (config-root) "/hadoop"))
         pid-dir (stevedore/script (str (pid-root) "/hadoop"))
         log-dir (stevedore/script (str (log-root) "/hadoop"))
@@ -75,73 +79,74 @@ INCOMPLETE - not yet ready for general use."
      request
      (parameter/assoc-for-target
       [:hadoop :home] home
-      [:hadoop :owner] user
       [:hadoop :group] group
+      [:hadoop :owner] user
+      [:hadoop :owner-dir] user-dir
       [:hadoop :config-dir] config-dir
       [:hadoop :data-dir] data-dir
       [:hadoop :pid-dir] pid-dir
       [:hadoop :log-dir] log-dir)
      (user/user user :system true)
      (user/group group :system true)
-     (remote-directory/remote-directory
-      home
-      :url url :md5-url (str url ".md5")
-      :unpack :tar :tar-options "xz"
-      :owner user :group group)
-     (for-> [path [log-path config-dir data-dir pid-dir log-dir]]
-            (directory/directory path :owner user :group group :mode "0755"))
+     (remote-directory/remote-directory home
+                                        :url url
+                                        :md5-url (str url ".md5")
+                                        :unpack :tar
+                                        :tar-options "xz"
+                                        :owner user :group group)
+     (for-> [path [config-dir data-dir pid-dir log-dir]]
+            (directory/directory path
+                                 :owner user
+                                 :group group
+                                 :mode "0755"))
      (file/symbolic-link config-dir etc-config-dir))))
 
-(defn hadoop-filesystem-dirs
-  ""
-  [request root]
-  (let [owner (parameter/get-for-target request [:hadoop :owner])
-        group (parameter/get-for-target request [:hadoop :group])]
-    (-> request
-        (directory/directory
-         (str root "/hadoop") :owner owner :group group)
-        (directory/directory
-         (str root "/hadoop/logs") :owner owner :group group)
-        (directory/directory
-         (str root "/tmp") :owner owner :group group :mode "a+rwxt"))))
+(defn hadoop-param
+  "Pulls the value referenced by the supplied key out of the supplied
+  hadoop cluster request map."
+  [request key]
+  (parameter/get-for-target request [:hadoop key]))
 
 (defn default-properties
   "Returns a nested map of default properties, named according to the
   0.20 api."
-  [data-root name-node-ip job-tracker-ip owner]
-  {:hdfs-site {:dfs.data.dir (str data-root "/hadoop/hdfs/data")
-               :dfs.datanode.du.reserved 1073741824
-               :dfs.name.dir (str data-root "/hadoop/hdfs/name")
-               :dfs.namenode.handler.count 10
-               :dfs.permissions.enabled true
-               :dfs.replication 3}
-   :mapred-site {:tasktracker.http.threads 46
-                 :mapred.child.java.opts "-Xmx550m"
-                 :mapred.child.ulimit 1126400
-                 :mapred.job.tracker (format "%s:8021" job-tracker-ip)
-                 :mapred.job.tracker.handler.count 10
-                 :mapred.local.dir (str data-root "/hadoop/hdfs/mapred/local")
-                 :mapred.map.tasks.speculative.execution true
-                 :mapred.reduce.tasks.speculative.execution false
-                 :mapred.reduce.parallel.copies 10
-                 :mapred.reduce.tasks 10
-                 :mapred.submit.replication 10
-                 :mapred.system.dir (str data-root "/hadoop/hdfs/system/mapred")
-                 :mapred.tasktracker.map.tasks.maximum 2
-                 :mapred.tasktracker.reduce.tasks.maximum 1
-                 :mapred.compress.map.output true
-                 :mapred.output.compression.type "BLOCK"}
-   :core-site {:fs.checkpoint.dir (str data-root "/hadoop/hdfs/secondary")
-               :fs.default.name (format "hdfs://%s:8020/" name-node-ip)
-               :fs.trash.interval 1440
-               :io.file.buffer.size 65536
-               :hadoop.tmp.dir (str data-root (str "/tmp/hadoop" owner))
-               :hadoop.rpc.socket.factory.class.default "org.apache.hadoop.net.StandardSocketFactory"
-               :hadoop.rpc.socket.factory.class.ClientProtocol ""
-               :hadoop.rpc.socket.factory.class.JobSubmissionProtocol ""
-               :io.compression.codecs (str
-                                       "org.apache.hadoop.io.compress.DefaultCodec,"
-                                       "org.apache.hadoop.io.compress.GzipCodec")}})
+  [owner-dir name-node-ip job-tracker-ip]
+  (let [owner-subdir (partial str owner-dir)]
+    {:hdfs-site {:dfs.data.dir (owner-subdir "/dfs/data")
+                 :dfs.name.dir (owner-subdir "/dfs/name")
+                 :dfs.datanode.du.reserved 1073741824
+                 :dfs.namenode.handler.count 10
+                 :dfs.permissions.enabled true
+                 :dfs.replication 3}
+     :mapred-site {:tasktracker.http.threads 46
+                   :mapred.local.dir (owner-subdir "/mapred/local")
+                   :mapred.system.dir "/hadoop/mapred/system"
+                   :mapred.child.java.opts "-Xmx550m"
+                   :mapred.child.ulimit 1126400
+                   :mapred.job.tracker (format "%s:8021" job-tracker-ip)
+                   :mapred.job.tracker.handler.count 10
+                   :mapred.map.tasks.speculative.execution true
+                   :mapred.reduce.tasks.speculative.execution false
+                   :mapred.reduce.parallel.copies 10
+                   :mapred.reduce.tasks 10
+                   :mapred.submit.replication 10
+                   :mapred.tasktracker.map.tasks.maximum 2
+                   :mapred.tasktracker.reduce.tasks.maximum 1
+                   :mapred.compress.map.output true
+                   :mapred.output.compression.type "BLOCK"}
+     :core-site {:fs.checkpoint.dir (owner-subdir "/dfs/secondary")
+                 :fs.default.name (format "hdfs://%s:8020" name-node-ip)
+                 :fs.trash.interval 1440
+                 :io.file.buffer.size 65536
+                 :hadoop.tmp.dir "/tmp/hadoop"
+                 :hadoop.rpc.socket.factory.class.default "org.apache.hadoop.net.StandardSocketFactory"
+                 :hadoop.rpc.socket.factory.class.ClientProtocol ""
+                 :hadoop.rpc.socket.factory.class.JobSubmissionProtocol ""
+                 :io.compression.codecs (str
+                                         "org.apache.hadoop.io.compress.DefaultCodec,"
+                                         "org.apache.hadoop.io.compress.GzipCodec")}}))
+
+;; TODO -- discuss what the hell these final properties are!
 
 (def final-properties
   #{:dfs.block.size
@@ -209,9 +214,9 @@ INCOMPLETE - not yet ready for general use."
 
 (defn config-files
   [request properties]
-  (let [config-dir (parameter/get-for-target request [:hadoop :config-dir])
-        owner (parameter/get-for-target request [:hadoop :owner])
-        group (parameter/get-for-target request [:hadoop :group])]
+  (let [config-dir (hadoop-param request :config-dir)
+        owner (hadoop-param request :owner)
+        group (hadoop-param request :group)]
     (->
      request
      (for-> [[filename props] properties]
@@ -235,9 +240,9 @@ INCOMPLETE - not yet ready for general use."
 
 (defn env-file
   [request]
-  (let [pid-dir (parameter/get-for-target request [:hadoop :pid-dir])
-        log-dir (parameter/get-for-target request [:hadoop :log-dir])
-        config-dir (parameter/get-for-target request [:hadoop :config-dir])]
+  (let [pid-dir (hadoop-param request :pid-dir)
+        log-dir (hadoop-param request :log-dir)
+        config-dir (hadoop-param request :config-dir)]
     (->
      request
      (remote-file/remote-file
@@ -245,9 +250,9 @@ INCOMPLETE - not yet ready for general use."
       :content
       (format-exports
        {:HADOOP_PID_DIR pid-dir
+        :HADOOP_LOG_DIR log-dir
         :HADOOP_SSH_OPTS "\"-o StrictHostKeyChecking=no\""
-        :HADOOP_OPTS "\"-Djava.net.preferIPv4Stack=true\""
-        :HADOOP_LOG_DIR (str log-dir "/logs")})))))
+        :HADOOP_OPTS "\"-Djava.net.preferIPv4Stack=true\""})))))
 
 (defn get-master-ip
   "Returns the IP address of a particular type of master node,
@@ -265,22 +270,30 @@ INCOMPLETE - not yet ready for general use."
              :public compute/primary-ip)
        master))))
 
+;;todo -- if we have the same tag for both, here, does that help us?
+
 (defn configure
   "Configure Hadoop cluster, with custom properties."
-  [request data-root name-node-tag job-tracker-tag ip-type {:as properties}]
+  [request name-node-tag job-tracker-tag ip-type {:as properties}]
+  {:pre [(contains? #{:public :private} ip-type)]}
   (let [name-node-ip (get-master-ip request ip-type name-node-tag)
         job-tracker-ip (get-master-ip request ip-type job-tracker-tag)
-        owner (parameter/get-for-target request [:hadoop :owner])
+        owner-dir (hadoop-param request :owner-dir)
+        log-dir (hadoop-param request :log-dir)
+        owner (hadoop-param request :owner)
+        group (hadoop-param request :group)
         defaults  (default-properties
-                    data-root name-node-ip job-tracker-ip owner)
+                    owner-dir name-node-ip job-tracker-ip)
         properties (merge-config defaults properties)
-        log-dir (parameter/get-for-target request [:hadoop :log-dir])]
+        tmpdir (get-in properties [:core-site :hadoop.tmp.dir])]
     (->
      request
-     (hadoop-filesystem-dirs data-root)
+     (directory/directory  tmpdir
+                           :owner owner
+                           :group group)
      (config-files properties)
      env-file
-     (file/symbolic-link (str data-root "/hadoop/logs") log-dir))))
+     (file/symbolic-link (str owner-dir "/logs") log-dir))))
 
 (script/defscript as-user [user & command])
 (stevedore/defimpl as-user :default [user & command]
@@ -292,8 +305,8 @@ INCOMPLETE - not yet ready for general use."
 (defn- hadoop-service
   "Run a Hadoop service"
   [request hadoop-daemon description]
-  (let [hadoop-home (parameter/get-for-target request [:hadoop :home])
-        hadoop-user (parameter/get-for-target request [:hadoop :owner])]
+  (let [hadoop-home (hadoop-param request :home)
+        hadoop-user (hadoop-param request :owner)]
     (->
      request
      (exec-script/exec-checked-script
@@ -311,8 +324,8 @@ INCOMPLETE - not yet ready for general use."
   "Runs '$ hadoop ...' on each machine in the request. Command runs
   has the hadoop user."
   [request & args]
-  (let [hadoop-home (parameter/get-for-target request [:hadoop :home])
-        hadoop-user (parameter/get-for-target request [:hadoop :owner])]
+  (let [hadoop-home (hadoop-param request :home)
+        hadoop-user (hadoop-param request :owner)]
     (->
      request
      (exec-script/exec-checked-script
@@ -326,8 +339,8 @@ INCOMPLETE - not yet ready for general use."
   "Formats HDFS for the first time. If HDFS has already been
   formatted, does nothing."
   [request]
-  (let [hadoop-home (parameter/get-for-target request [:hadoop :home])
-        hadoop-user (parameter/get-for-target request [:hadoop :owner])]
+  (let [hadoop-home (hadoop-param request :home)
+        hadoop-user (hadoop-param request :owner)]
     (->
      request
      (exec-script/exec-script
@@ -338,6 +351,8 @@ INCOMPLETE - not yet ready for general use."
                  "namenode"
                  "-format")))))))
 
+;; TODO -- think about the dfsadmin call, etc, that's happening
+;; here. is that needed? Do we need to run this mkdir?
 (defn name-node
   "Run a Hadoop name node."
   [request data-dir]
