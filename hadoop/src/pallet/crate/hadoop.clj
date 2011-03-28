@@ -23,7 +23,7 @@
 
 (ns pallet.crate.hadoop
   "Pallet crate to manage Hadoop installation and configuration.
-INCOMPLETE - not yet ready for general use."
+INCOMPLETE - not yet ready for general use, but close!"
   (:use [pallet.thread-expr :only (apply->)]
         [pallet.resource :only (phase)])
   (:require [pallet.parameter :as parameter]
@@ -56,6 +56,7 @@ INCOMPLETE - not yet ready for general use."
 
 ;; ### Utilities
 
+;; TODO -- we can remove this, when hugod adds it 
 (defmacro for->
   "Custom version of for->, with support for destructuring."
   [arg seq-exprs body-expr]
@@ -95,7 +96,8 @@ INCOMPLETE - not yet ready for general use."
   [request path content]
   (let [owner (hadoop-param request :owner)
         group (hadoop-param request :group)]
-    (remote-file/remote-file path
+    (remote-file/remote-file request
+                             path
                              :content content
                              :owner owner
                              :group group)))
@@ -184,15 +186,7 @@ INCOMPLETE - not yet ready for general use."
 
 (defn populate-request
   [request user group home]
-  (parameter/assoc-for-target request
-                              [:hadoop :owner] user
-                              [:hadoop :group] group
-                              [:hadoop :home] home
-                              [:hadoop :owner-dir] (stevedore/script (user/user-home ~user))
-                              [:hadoop :config-dir] (str home "/conf")
-                              [:hadoop :data-dir] "/data"
-                              [:hadoop :pid-dir] (stevedore/script (str (pid-root) "/hadoop"))
-                              [:hadoop :log-dir] (stevedore/script (str (log-root) "/hadoop"))))
+  )
 
 (defn install
   "Initial hadoop installation."
@@ -201,10 +195,24 @@ INCOMPLETE - not yet ready for general use."
                    group default-group
                    version default-version}}]
   (let [url (url version)
-        home (or home (format "%s-%s" default-home version))]
+        home (or home (format "%s-%s" default-home version))
+        conf-dir (str home "/conf")
+        etc-conf-dir (stevedore/script (str (config-root) "/hadoop"))
+        pid-dir (stevedore/script (str (pid-root) "/hadoop"))
+        log-dir (stevedore/script (str (log-root) "/hadoop"))
+        owner-dir (stevedore/script (user/user-home ~user))
+        data-dir "/data"]
     (->
      request
-     (populate-request user group home)
+     (parameter/assoc-for-target
+      [:hadoop :owner] user
+      [:hadoop :group] group
+      [:hadoop :home] home
+      [:hadoop :owner-dir] owner-dir
+      [:hadoop :config-dir] conf-dir
+      [:hadoop :data-dir] data-dir
+      [:hadoop :pid-dir] pid-dir
+      [:hadoop :log-dir] log-dir)
      (create-hadoop-user)
      (remote-directory/remote-directory home
                                         :url url
@@ -213,14 +221,12 @@ INCOMPLETE - not yet ready for general use."
                                         :tar-options "xz"
                                         :owner user
                                         :group group)
-     (for-> [path (map (partial hadoop-param request)
-                       [:config-dir :data-dir :pid-dir :log-dir])]
+     (for-> [path  [conf-dir data-dir pid-dir log-dir]]
             (directory/directory path
                                  :owner user
                                  :group group
                                  :mode "0755"))
-     (file/symbolic-link (hadoop-param request :config-dir)
-                         (stevedore/script (str (config-root) "/hadoop"))))))
+     (file/symbolic-link conf-dir etc-conf-dir))))
 
 ;; ### Configuration
 
@@ -320,7 +326,6 @@ INCOMPLETE - not yet ready for general use."
 
 (defn properties->xml
   [properties]
-  (letfn)
   (ppxml
    (with-out-str
      (prxml/prxml
@@ -388,7 +393,7 @@ INCOMPLETE - not yet ready for general use."
   {:pre [(contains? #{:public :private} ip-type)]}
   (let [name-node-ip (get-master-ip request ip-type name-node-tag)
         job-tracker-ip (get-master-ip request ip-type job-tracker-tag)
-        owner-dir (hadoop-param request :owner-dir)
+        owner-dir (parameter/get-for-target request [:hadoop :owner-dir])
         log-dir (hadoop-param request :log-dir)
         owner (hadoop-param request :owner)
         group (hadoop-param request :group)
@@ -396,6 +401,7 @@ INCOMPLETE - not yet ready for general use."
                     owner-dir name-node-ip job-tracker-ip)
         properties (merge-config defaults properties)
         tmpdir (get-in properties [:core-site :hadoop.tmp.dir])]
+    #_(println request)
     (->
      request
      (directory/directory  tmpdir
