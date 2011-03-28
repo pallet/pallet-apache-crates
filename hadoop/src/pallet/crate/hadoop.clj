@@ -69,12 +69,29 @@ INCOMPLETE - not yet ready for general use."
    (for [[k v] (partition 2 kv-pairs)]
      (format "export %s=%s\n" (name k) v))))
 
+(defn hadoop-param
+  "Pulls the value referenced by the supplied key out of the supplied
+  hadoop cluster request map."
+  [request key]
+  (parameter/get-for-target request [:hadoop key]))
+
+(defn remote-file
+  "Remote file implementation for hadoop install TODO -- why are we
+  abstracting this out?."
+  [request path content]
+  (let [owner (hadoop-param request :owner)
+        group (hadoop-param request :group)]
+    (remote-file/remote-file path
+                             :content content
+                             :owner owner
+                             :group group)))
+
 (defn create-hadoop-user
   "Create the hadoop user"
   [request]
-  (let [user (parameter/get-for-target request [:hadoop :owner])
-        group (parameter/get-for-target request [:hadoop :group])
-        hadoop-home (parameter/get-for-target request [:hadoop :home])
+  (let [user (hadoop-param request :owner)
+        group (hadoop-param request :group)
+        hadoop-home (hadoop-param request :home)
         jdk-home (stevedore/script (java/java-home))]
     (-> request
         (user/group group :system true)
@@ -82,19 +99,18 @@ INCOMPLETE - not yet ready for general use."
                    :system true
                    :create-home true
                    :shell :bash)
-        (remote-file/remote-file
-         (str "/home/" user "/.bash_profile")
-         :owner user
-         :group group
-         :literal true
-         :content
-         (format-exports :JAVA_HOME jdk-home
-                         :PATH (format "$PATH:%s" (str hadoop-home "/bin")))))))
+        (remote-file/remote-file (str "/home/" user "/.bash_profile")
+                                 :owner user
+                                 :group group
+                                 :literal true
+                                 :content
+                                 (format-exports :JAVA_HOME jdk-home
+                                                 :PATH (format "$PATH:%s" (str hadoop-home "/bin")))))))
 
 (defn publish-ssh-key
   "Sets up this node to be able passwordlessly ssh into the other nodes (slaves)"
   [request]
-  (let [user (parameter/get-for-target request [:hadoop :owner])
+  (let [user (hadoop-param request :owner)
         id (request-map/target-id request)
         tag (request-map/tag request)
         key-name (format "%s_%s_key" tag id)]
@@ -112,7 +128,10 @@ INCOMPLETE - not yet ready for general use."
   "get the ssh for a user in a group"
   [request tag user]
   (for [node (get-node-ids-for-group request tag)]
-    (parameter/get-for request [:host (keyword node) :user (keyword user) :id_rsa])))
+    (parameter/get-for request
+                       [:host (keyword node)
+                        :user (keyword user)
+                        :id_rsa])))
 
 #_(defn authorize-group
   [request user tag users]
@@ -123,29 +142,26 @@ INCOMPLETE - not yet ready for general use."
       [key keys]
       (ssh-key/authorize-key user key)))))
 
-(defn- authorize-key [request local-user group remote-user]
+(defn- authorize-key
+  [request local-user group remote-user]
   (let [keys (get-keys-for-group request group remote-user)]
     (for-> request
            [key keys]
            (ssh-key/authorize-key local-user key))))
 
-(defn- compute-authorizations [local-users group-remote-users-map]
-  (for [local-user local-users
-              [group remote-users] group-remote-users-map
-              remote-user remote-users]
-          [local-user group remote-user]))
-
 (defn authorize-groups
   "Authorizes the master node to ssh into this node"
   [request local-users tag-remote-users-map]
-  (let [authorizations (compute-authorizations local-users tag-remote-users-map)]
-    (for-> request
-           [authorization authorizations]
-           (apply-> authorize-key authorization))))
+  (for-> request
+         [local-user local-users
+          [group remote-users] tag-remote-users-map
+          remote-user remote-users
+          :let [authorization [local-user group remote-user]]]
+         (apply-> authorize-key authorization)))
 
-(defn authorize-jobtracker [request]
+(defn authorize-jobtracker
+  [request]
   (authorize-groups request ["hadoop"] {"jobtracker" ["hadoop"]}))
-
 
 (defn install
   "Initial hadoop installation."
@@ -186,12 +202,6 @@ INCOMPLETE - not yet ready for general use."
                                  :group group
                                  :mode "0755"))
      (file/symbolic-link config-dir etc-config-dir))))
-
-(defn hadoop-param
-  "Pulls the value referenced by the supplied key out of the supplied
-  hadoop cluster request map."
-  [request key]
-  (parameter/get-for-target request [:hadoop key]))
 
 (defn default-properties
   "Returns a nested map of default properties, named according to the
@@ -297,17 +307,6 @@ INCOMPLETE - not yet ready for general use."
        (map
         #(property->xml % (final-properties (key %)))
         properties)]))))
-
-(defn remote-file
-  "Remote file implementation for hadoop install TODO -- why are we
-  abstracting this out?."
-  [request path content]
-  (let [owner (hadoop-param request :owner)
-        group (hadoop-param request :group)]
-    (remote-file/remote-file path
-                             :content content
-                             :owner owner
-                             :group group)))
 
 (defn config-files
   "TODO -- Creates XML configuration files for hadoop, located in the
