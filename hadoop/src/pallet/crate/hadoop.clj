@@ -173,13 +173,17 @@ INCOMPLETE - not yet ready for general use."
       [:hadoop :pid-dir] pid-dir
       [:hadoop :log-dir] log-dir)
      (create-hadoop-user)
-     (remote-directory/remote-directory
-      home
-      :url url :md5-url (str url ".md5")
-      :unpack :tar :tar-options "xz"
-      :owner user :group group)
-     (for-> [path [log-path etc-config-dir config-dir data-dir pid-dir log-dir]]
-            (directory/directory path :owner user :group group :mode "0755"))
+     (remote-directory/remote-directory home
+                                        :url url
+                                        :md5-url (str url ".md5")
+                                        :unpack :tar
+                                        :tar-options "xz"
+                                        :owner user :group group)
+     (for-> [path [config-dir data-dir pid-dir log-dir]]
+            (directory/directory path
+                                 :owner user
+                                 :group group
+                                 :mode "0755"))
      (file/symbolic-link config-dir etc-config-dir))))
 
 (defn hadoop-param
