@@ -24,7 +24,7 @@
 (ns pallet.crate.hadoop
   "Pallet crate to manage Hadoop installation and configuration.
 INCOMPLETE - not yet ready for general use."
-  (:use [pallet.thread-expr :only (for->)]
+  (:use [pallet.thread-expr :only (for-> apply->)]
         [pallet.resource :only (phase)])
   (:require [pallet.parameter :as parameter]
             [pallet.stevedore :as stevedore]
@@ -40,7 +40,8 @@ INCOMPLETE - not yet ready for general use."
             [pallet.crate.java :as java]
             [clojure.contrib.prxml :as prxml]
             [clojure.string :as string]
-            [clojure.contrib.logging :as log]))
+            [clojure.contrib.logging :as log]
+            [pallet.crate.ssh-key :as ssh-key]))
 
 ;; This crate contains all information required to set up and
 ;; configure a fully functional installation of Apache's
@@ -90,6 +91,62 @@ INCOMPLETE - not yet ready for general use."
          (format-exports :JAVA_HOME jdk-home
                          :PATH (format "$PATH:%s" (str hadoop-home "/bin")))))))
 
+(defn publish-ssh-key
+  "Sets up this node to be able passwordlessly ssh into the other nodes (slaves)"
+  [request]
+  (let [user (parameter/get-for-target request [:hadoop :owner])
+        id (request-map/target-id request)
+        tag (request-map/tag request)
+        key-name (format "%s_%s_key" tag id)]
+    (-> request
+        (ssh-key/generate-key user :comment key-name)
+        (ssh-key/record-public-key user))))
+
+(defn- get-node-ids-for-group
+  "Get the id of the nodes in a group node"
+  [request tag]
+  (let [nodes (request-map/nodes-in-tag request tag)]
+    (map compute/id nodes)))
+
+(defn- get-keys-for-group
+  "get the ssh for a user in a group"
+  [request tag user]
+  (for [node (get-node-ids-for-group request tag)]
+    (parameter/get-for request [:host (keyword node) :user (keyword user) :id_rsa])))
+
+#_(defn authorize-group
+  [request user tag users]
+  (let [keys (get-keys-for-group request tag users)]
+    (->
+     request
+     (for->
+      [key keys]
+      (ssh-key/authorize-key user key)))))
+
+(defn- authorize-key [request local-user group remote-user]
+  (let [keys (get-keys-for-group request group remote-user)]
+    (for-> request
+           [key keys]
+           (ssh-key/authorize-key local-user key))))
+
+(defn- compute-authorizations [local-users group-remote-users-map]
+  (for [local-user local-users
+              [group remote-users] group-remote-users-map
+              remote-user remote-users]
+          [local-user group remote-user]))
+
+(defn authorize-groups
+  "Authorizes the master node to ssh into this node"
+  [request local-users tag-remote-users-map]
+  (let [authorizations (compute-authorizations local-users tag-remote-users-map)]
+    (for-> request
+           [authorization authorizations]
+           (apply-> authorize-key authorization))))
+
+(defn authorize-jobtracker [request]
+  (authorize-groups request ["hadoop"] {"jobtracker" ["hadoop"]}))
+
+
 (defn install
   "Initial hadoop installation."
   [request & {:keys [user group version home]
@@ -121,7 +178,7 @@ INCOMPLETE - not yet ready for general use."
       :url url :md5-url (str url ".md5")
       :unpack :tar :tar-options "xz"
       :owner user :group group)
-     (for-> [path [log-path config-dir data-dir pid-dir log-dir]]
+     (for-> [path [log-path etc-config-dir config-dir data-dir pid-dir log-dir]]
             (directory/directory path :owner user :group group :mode "0755"))
      (file/symbolic-link config-dir etc-config-dir))))
 
