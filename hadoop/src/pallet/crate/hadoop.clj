@@ -93,7 +93,8 @@ INCOMPLETE - not yet ready for general use."
                                         :md5-url (str url ".md5")
                                         :unpack :tar
                                         :tar-options "xz"
-                                        :owner user :group group)
+                                        :owner user
+                                        :group group)
      (for-> [path [config-dir data-dir pid-dir log-dir]]
             (directory/directory path
                                  :owner user
@@ -212,18 +213,29 @@ INCOMPLETE - not yet ready for general use."
         #(property->xml % (final-properties (key %)))
         properties)]))))
 
-(defn config-files
-  [request properties]
-  (let [config-dir (hadoop-param request :config-dir)
-        owner (hadoop-param request :owner)
+(defn remote-file
+  "Remote file implementation for hadoop install TODO -- why are we
+  abstracting this out?."
+  [request path content]
+  (let [owner (hadoop-param request :owner)
         group (hadoop-param request :group)]
+    (remote-file/remote-file path
+                             :content content
+                             :owner owner
+                             :group group)))
+
+(defn config-files
+  "TODO -- Creates XML configuration files for hadoop, located in the
+  config directory."
+  [request properties]
+  (let [config-dir (hadoop-param request :config-dir)]
     (->
      request
      (for-> [[filename props] properties]
-            (remote-file/remote-file
-             (format "%s/%s.xml" config-dir (name filename))
-             :content (properties->xml props)
-             :owner owner :group group)))))
+            (remote-file (format "%s/%s.xml"
+                                 config-dir
+                                 (name filename))
+                         (properties->xml props))))))
 
 (defn merge-config
   "Takes a map of Hadoop configuration options and merges in the
@@ -233,9 +245,11 @@ INCOMPLETE - not yet ready for general use."
          (for [[name props] default-props]
            {name (merge props (name new-props))})))
 
-(defn format-exports [export-map]
+(defn format-exports
+  "Formats `export` lines for inclusion in a shell script."
+  [& kv-pairs]
   (string/join
-   (for [[k v] export-map]
+   (for [[k v] (partition 2 kv-pairs)]
      (format "export %s=%s\n" (name k) v))))
 
 (defn env-file
@@ -245,14 +259,11 @@ INCOMPLETE - not yet ready for general use."
         config-dir (hadoop-param request :config-dir)]
     (->
      request
-     (remote-file/remote-file
-      (str config-dir "/hadoop-env.sh")
-      :content
-      (format-exports
-       {:HADOOP_PID_DIR pid-dir
-        :HADOOP_LOG_DIR log-dir
-        :HADOOP_SSH_OPTS "\"-o StrictHostKeyChecking=no\""
-        :HADOOP_OPTS "\"-Djava.net.preferIPv4Stack=true\""})))))
+     (remote-file (str config-dir "/hadoop-env.sh")
+                  (format-exports :HADOOP_PID_DIR pid-dir
+                                  :HADOOP_LOG_DIR log-dir
+                                  :HADOOP_SSH_OPTS "\"-o StrictHostKeyChecking=no\""
+                                  :HADOOP_OPTS "\"-Djava.net.preferIPv4Stack=true\"")))))
 
 (defn get-master-ip
   "Returns the IP address of a particular type of master node,
