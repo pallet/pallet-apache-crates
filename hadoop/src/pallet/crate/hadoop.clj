@@ -178,7 +178,8 @@ INCOMPLETE - not yet ready for general use."
                                         :md5-url (str url ".md5")
                                         :unpack :tar
                                         :tar-options "xz"
-                                        :owner user :group group)
+                                        :owner user
+                                        :group group)
      (for-> [path [config-dir data-dir pid-dir log-dir]]
             (directory/directory path
                                  :owner user
