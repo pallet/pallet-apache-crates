@@ -24,7 +24,7 @@
 (ns pallet.crate.hadoop
   "Pallet crate to manage Hadoop installation and configuration.
 INCOMPLETE - not yet ready for general use."
-  (:use [pallet.thread-expr :only (for-> apply->)]
+  (:use [pallet.thread-expr :only (apply->)]
         [pallet.resource :only (phase)])
   (:require [pallet.parameter :as parameter]
             [pallet.stevedore :as stevedore]
@@ -53,6 +53,20 @@ INCOMPLETE - not yet ready for general use."
 (def default-user "hadoop")
 (def default-group "hadoop")
 (def default-version "0.20.2")
+
+;; ### Utilities
+
+(defmacro for->
+  "Custom version of for->, with support for destructuring."
+  [arg seq-exprs body-expr]
+  `((apply comp (reverse
+                 (for ~seq-exprs
+                   (fn [arg#]
+                     (-> arg#
+                         ~body-expr)))))
+    ~arg))
+
+;; ### Hadoop Utils
 
 (defn url
   "Download URL for the Apache distribution of Hadoop, generated for
@@ -86,6 +100,8 @@ INCOMPLETE - not yet ready for general use."
                              :owner owner
                              :group group)))
 
+;; ### User Creation
+
 (defn create-hadoop-user
   "Create the hadoop user"
   [request]
@@ -99,13 +115,15 @@ INCOMPLETE - not yet ready for general use."
                    :system true
                    :create-home true
                    :shell :bash)
-        (remote-file/remote-file (str "/home/" user "/.bash_profile")
-                                 :owner user
-                                 :group group
-                                 :literal true
-                                 :content
-                                 (format-exports :JAVA_HOME jdk-home
-                                                 :PATH (format "$PATH:%s" (str hadoop-home "/bin")))))))
+        (remote-file/remote-file
+         (str "/home/" user "/.bash_profile")
+         :owner user
+         :group group
+         :literal true
+         :content
+         (format-exports
+          :JAVA_HOME jdk-home
+          :PATH (format "$PATH:%s/bin" hadoop-home))))))
 
 (defn publish-ssh-key
   "Sets up this node to be able passwordlessly ssh into the other nodes (slaves)"
@@ -138,9 +156,8 @@ INCOMPLETE - not yet ready for general use."
   (let [keys (get-keys-for-group request tag users)]
     (->
      request
-     (for->
-      [key keys]
-      (ssh-key/authorize-key user key)))))
+     (for-> [key keys]
+            (ssh-key/authorize-key user key)))))
 
 (defn- authorize-key
   [request local-user group remote-user]
@@ -163,6 +180,20 @@ INCOMPLETE - not yet ready for general use."
   [request]
   (authorize-groups request ["hadoop"] {"jobtracker" ["hadoop"]}))
 
+;; ### Installation
+
+(defn populate-request
+  [request user group home]
+  (parameter/assoc-for-target request
+                              [:hadoop :owner] user
+                              [:hadoop :group] group
+                              [:hadoop :home] home
+                              [:hadoop :owner-dir] (stevedore/script (user/user-home ~user))
+                              [:hadoop :config-dir] (str home "/conf")
+                              [:hadoop :data-dir] "/data"
+                              [:hadoop :pid-dir] (stevedore/script (str (pid-root) "/hadoop"))
+                              [:hadoop :log-dir] (stevedore/script (str (log-root) "/hadoop"))))
+
 (defn install
   "Initial hadoop installation."
   [request & {:keys [user group version home]
@@ -170,24 +201,10 @@ INCOMPLETE - not yet ready for general use."
                    group default-group
                    version default-version}}]
   (let [url (url version)
-        home (or home (format "%s-%s" default-home version))
-        config-dir (str home "/conf")
-        user-dir (stevedore/script (user/user-home ~user))
-        etc-config-dir (stevedore/script (str (config-root) "/hadoop"))
-        pid-dir (stevedore/script (str (pid-root) "/hadoop"))
-        log-dir (stevedore/script (str (log-root) "/hadoop"))
-        data-dir "/data"]
+        home (or home (format "%s-%s" default-home version))]
     (->
      request
-     (parameter/assoc-for-target
-      [:hadoop :home] home
-      [:hadoop :group] group
-      [:hadoop :owner] user
-      [:hadoop :owner-dir] user-dir
-      [:hadoop :config-dir] config-dir
-      [:hadoop :data-dir] data-dir
-      [:hadoop :pid-dir] pid-dir
-      [:hadoop :log-dir] log-dir)
+     (populate-request user group home)
      (create-hadoop-user)
      (remote-directory/remote-directory home
                                         :url url
@@ -196,12 +213,16 @@ INCOMPLETE - not yet ready for general use."
                                         :tar-options "xz"
                                         :owner user
                                         :group group)
-     (for-> [path [config-dir data-dir pid-dir log-dir]]
+     (for-> [path (map (partial hadoop-param request)
+                       [:config-dir :data-dir :pid-dir :log-dir])]
             (directory/directory path
                                  :owner user
                                  :group group
                                  :mode "0755"))
-     (file/symbolic-link config-dir etc-config-dir))))
+     (file/symbolic-link (hadoop-param request :config-dir)
+                         (stevedore/script (str (config-root) "/hadoop"))))))
+
+;; ### Configuration
 
 (defn default-properties
   "Returns a nested map of default properties, named according to the
@@ -299,6 +320,7 @@ INCOMPLETE - not yet ready for general use."
 
 (defn properties->xml
   [properties]
+  (letfn)
   (ppxml
    (with-out-str
      (prxml/prxml
@@ -337,10 +359,11 @@ INCOMPLETE - not yet ready for general use."
     (->
      request
      (remote-file (str config-dir "/hadoop-env.sh")
-                  (format-exports :HADOOP_PID_DIR pid-dir
-                                  :HADOOP_LOG_DIR log-dir
-                                  :HADOOP_SSH_OPTS "\"-o StrictHostKeyChecking=no\""
-                                  :HADOOP_OPTS "\"-Djava.net.preferIPv4Stack=true\"")))))
+                  (format-exports
+                   :HADOOP_PID_DIR pid-dir
+                   :HADOOP_LOG_DIR log-dir
+                   :HADOOP_SSH_OPTS "\"-o StrictHostKeyChecking=no\""
+                   :HADOOP_OPTS "\"-Djava.net.preferIPv4Stack=true\"")))))
 
 (defn get-master-ip
   "Returns the IP address of a particular type of master node,
@@ -355,8 +378,7 @@ INCOMPLETE - not yet ready for general use."
       (log/error (format "There is no %s defined!" kind))
       ((case ip-type
              :private compute/private-ip
-             :public compute/primary-ip)
-       master))))
+             :public compute/primary-ip) master))))
 
 ;;todo -- if we have the same tag for both, here, does that help us?
 
