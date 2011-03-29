@@ -5,8 +5,8 @@
 ;; with this work for additional information regarding copyright
 ;; ownership.  The ASF licenses this file to you under the Apache
 ;; License, Version 2.0 (the "License"); you may not use this file
-;; except in compliance with the License.  You may obtain a copy of the
-;; License at http://www.apache.org/licenses/LICENSE-2.0 Unless
+;; except in compliance with the License.  You may obtain a copy of
+;; the License at http://www.apache.org/licenses/LICENSE-2.0 Unless
 ;; required by applicable law or agreed to in writing, software
 ;; distributed under the License is distributed on an "AS IS" BASIS,
 ;; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
@@ -49,14 +49,16 @@ INCOMPLETE - not yet ready for general use, but close!"
 ;; G. Noll's [single node](http://goo.gl/8ogSk) and [multiple
 ;; node](http://goo.gl/NIWoK) hadoop cluster tutorials to be helpful.
 
-(def default-home "/usr/local/hadoop")
-(def default-user "hadoop")
-(def default-group "hadoop")
-(def default-version "0.20.2")
+;; TODO -- why first? Why are we creating these as defaults?
+
+(def hadoop-user "hadoop")
+(def hadoop-group "hadoop")
 
 ;; ### Utilities
 
-;; TODO -- we can remove this, when hugod adds it 
+;; ### Hadoop Utils
+
+;; TODO -- we can remove this, when hugod adds it to pallet.
 (defmacro for->
   "Custom version of for->, with support for destructuring."
   [arg seq-exprs body-expr]
@@ -66,16 +68,6 @@ INCOMPLETE - not yet ready for general use, but close!"
                      (-> arg#
                          ~body-expr)))))
     ~arg))
-
-;; ### Hadoop Utils
-
-(defn url
-  "Download URL for the Apache distribution of Hadoop, generated for
-  the supplied version."
-  [version]
-  (format
-   "http://www.apache.org/dist/hadoop/core/hadoop-%s/hadoop-%s.tar.gz"
-   version version))
 
 (defn format-exports
   "Formats `export` lines for inclusion in a shell script."
@@ -90,53 +82,39 @@ INCOMPLETE - not yet ready for general use, but close!"
   [request key]
   (parameter/get-for-target request [:hadoop key]))
 
-(defn remote-file
-  "Remote file implementation for hadoop install TODO -- why are we
-  abstracting this out?."
-  [request path content]
-  (let [owner (hadoop-param request :owner)
-        group (hadoop-param request :group)]
-    (remote-file/remote-file request
-                             path
-                             :content content
-                             :owner owner
-                             :group group)))
-
 ;; ### User Creation
 
+;; TODO -- abstract out the home string, here?
 (defn create-hadoop-user
   "Create the hadoop user"
-  [request]
-  (let [user (hadoop-param request :owner)
-        group (hadoop-param request :group)
-        hadoop-home (hadoop-param request :home)
-        jdk-home (stevedore/script (java/java-home))]
+  [request hadoop-home]
+  (let [jdk-home (stevedore/script (java/java-home))]
     (-> request
-        (user/group group :system true)
-        (user/user user
+        (user/group hadoop-group :system true)
+        (user/user hadoop-user
                    :system true
                    :create-home true
                    :shell :bash)
         (remote-file/remote-file
-         (str "/home/" user "/.bash_profile")
-         :owner user
-         :group group
+         (format "/home/%s/.bash_profile" hadoop-user)
+         :owner hadoop-user
+         :group hadoop-group
          :literal true
-         :content
-         (format-exports
-          :JAVA_HOME jdk-home
-          :PATH (format "$PATH:%s/bin" hadoop-home))))))
+         :content (format-exports
+                   :JAVA_HOME jdk-home
+                   :PATH (format "$PATH:%s/bin" hadoop-home))))))
 
+;; TODO -- called from pallet cascalog. put somewhere else?
 (defn publish-ssh-key
-  "Sets up this node to be able passwordlessly ssh into the other nodes (slaves)"
+  "Sets up this node to be able passwordlessly ssh into the other
+  nodes (slaves)"
   [request]
-  (let [user (hadoop-param request :owner)
-        id (request-map/target-id request)
+  (let [id (request-map/target-id request)
         tag (request-map/tag request)
         key-name (format "%s_%s_key" tag id)]
     (-> request
-        (ssh-key/generate-key user :comment key-name)
-        (ssh-key/record-public-key user))))
+        (ssh-key/generate-key hadoop-user :comment key-name)
+        (ssh-key/record-public-key hadoop-user))))
 
 (defn- get-node-ids-for-group
   "Get the id of the nodes in a group node"
@@ -153,6 +131,7 @@ INCOMPLETE - not yet ready for general use, but close!"
                         :user (keyword user)
                         :id_rsa])))
 
+;; TODO -- delete?
 #_(defn authorize-group
   [request user tag users]
   (let [keys (get-keys-for-group request tag users)]
@@ -180,61 +159,51 @@ INCOMPLETE - not yet ready for general use, but close!"
 
 (defn authorize-jobtracker
   [request]
-  (authorize-groups request ["hadoop"] {"jobtracker" ["hadoop"]}))
+  (authorize-groups request
+                    [hadoop-user]
+                    {"jobtracker" [hadoop-user]}))
 
 ;; ### Installation
 
-(defn populate-request
-  [request user group home]
-  )
+(def default-version "0.20.2")
+(defn default-home
+  "Default Hadoop location, based on version number."
+  [version]
+  (format "/usr/local/hadoop-%s" version))
+
+(defn url
+  "Download URL for the Apache distribution of Hadoop, generated for
+  the supplied version."
+  [version]
+  (format
+   "http://www.apache.org/dist/hadoop/core/hadoop-%s/hadoop-%s.tar.gz"
+   version version))
 
 (defn install
   "Initial hadoop installation."
-  [request & {:keys [user group version home]
-              :or {user default-user
-                   group default-group
-                   version default-version}}]
+  [request & {:keys [version home]
+              :or {version default-version}}]
   (let [url (url version)
-        home (or home (format "%s-%s" default-home version))
-        conf-dir (str home "/conf")
-        etc-conf-dir (stevedore/script (str (config-root) "/hadoop"))
-        pid-dir (stevedore/script (str (pid-root) "/hadoop"))
-        log-dir (stevedore/script (str (log-root) "/hadoop"))
-        owner-dir (stevedore/script (user/user-home ~user))
-        data-dir "/data"]
+        home (or home (default-home version))]
     (->
      request
-     (parameter/assoc-for-target
-      [:hadoop :owner] user
-      [:hadoop :group] group
-      [:hadoop :home] home
-      [:hadoop :owner-dir] owner-dir
-      [:hadoop :config-dir] conf-dir
-      [:hadoop :data-dir] data-dir
-      [:hadoop :pid-dir] pid-dir
-      [:hadoop :log-dir] log-dir)
-     (create-hadoop-user)
+     (create-hadoop-user home)
      (remote-directory/remote-directory home
                                         :url url
                                         :md5-url (str url ".md5")
                                         :unpack :tar
                                         :tar-options "xz"
-                                        :owner user
-                                        :group group)
-     (for-> [path  [conf-dir data-dir pid-dir log-dir]]
-            (directory/directory path
-                                 :owner user
-                                 :group group
-                                 :mode "0755"))
-     (file/symbolic-link conf-dir etc-conf-dir))))
+                                        :owner hadoop-user
+                                        :group hadoop-user))))
 
 ;; ### Configuration
 
 (defn default-properties
   "Returns a nested map of default properties, named according to the
   0.20 api."
-  [owner-dir name-node-ip job-tracker-ip]
-  (let [owner-subdir (partial str owner-dir)]
+  [name-node-ip job-tracker-ip]
+  (let [owner-dir (stevedore/script (user/user-home ~hadoop-user))
+        owner-subdir (partial str owner-dir)]
     {:hdfs-site {:dfs.data.dir (owner-subdir "/dfs/data")
                  :dfs.name.dir (owner-subdir "/dfs/name")
                  :dfs.datanode.du.reserved 1073741824
@@ -338,16 +307,14 @@ INCOMPLETE - not yet ready for general use, but close!"
 (defn config-files
   "TODO -- Creates XML configuration files for hadoop, located in the
   config directory."
-  [request properties]
-  (let [config-dir (hadoop-param request :config-dir)]
-    (->
-     request
-     (for-> [[filename props] properties]
-            (remote-file (format "%s/%s.xml"
-                                 config-dir
-                                 (name filename))
-                         (properties->xml props))))))
-
+  [request config-dir properties]
+  (->
+   request
+   (for-> [[filename props] properties]
+          (remote-file/remote-file
+           (format "%s/%s.xml" config-dir (name filename))
+           :content (properties->xml props)
+           :owner hadoop-user :group hadoop-group))))
 (defn merge-config
   "Takes a map of Hadoop configuration options and merges in the
   supplied map of custom configuration options."
@@ -357,24 +324,23 @@ INCOMPLETE - not yet ready for general use, but close!"
            {name (merge props (name new-props))})))
 
 (defn env-file
-  [request]
-  (let [pid-dir (hadoop-param request :pid-dir)
-        log-dir (hadoop-param request :log-dir)
-        config-dir (hadoop-param request :config-dir)]
-    (->
-     request
-     (remote-file (str config-dir "/hadoop-env.sh")
-                  (format-exports
-                   :HADOOP_PID_DIR pid-dir
-                   :HADOOP_LOG_DIR log-dir
-                   :HADOOP_SSH_OPTS "\"-o StrictHostKeyChecking=no\""
-                   :HADOOP_OPTS "\"-Djava.net.preferIPv4Stack=true\"")))))
+  [request config-dir log-dir pid-dir]
+  (->
+   request
+   (remote-file/remote-file
+    (str config-dir "/hadoop-env.sh")
+    :content (format-exports
+              :HADOOP_PID_DIR pid-dir
+              :HADOOP_LOG_DIR log-dir
+              :HADOOP_SSH_OPTS "\"-o StrictHostKeyChecking=no\""
+              :HADOOP_OPTS "\"-Djava.net.preferIPv4Stack=true\""))))
 
 (defn get-master-ip
   "Returns the IP address of a particular type of master node,
-  as defined by tag. IP-type can be :private or :public. Logs a
+  as defined by tag. IP-type can be `:private` or `:public`. Logs a
   warning if more than one master exists."
   [request ip-type tag]
+  {:pre [(contains? #{:public :private} ip-type)]}
   (let [[master :as nodes] (request-map/nodes-in-tag request tag)
         kind (name tag)]
     (when (> (count nodes) 1)
@@ -385,31 +351,38 @@ INCOMPLETE - not yet ready for general use, but close!"
              :private compute/private-ip
              :public compute/primary-ip) master))))
 
-;;todo -- if we have the same tag for both, here, does that help us?
-
+;;todo -- if we have the same tag for both masters, here, does that
+;;help us?
+;;default-home?
+;; TODO -- modify pallet-cascalog to supply defaults?
+;; TODO -- check default properties -- we probably have to pull log,
+;;etc out
 (defn configure
-  "Configure Hadoop cluster, with custom properties."
-  [request name-node-tag job-tracker-tag ip-type {:as properties}]
-  {:pre [(contains? #{:public :private} ip-type)]}
-  (let [name-node-ip (get-master-ip request ip-type name-node-tag)
-        job-tracker-ip (get-master-ip request ip-type job-tracker-tag)
-        owner-dir (parameter/get-for-target request [:hadoop :owner-dir])
-        log-dir (hadoop-param request :log-dir)
-        owner (hadoop-param request :owner)
-        group (hadoop-param request :group)
-        defaults  (default-properties
-                    owner-dir name-node-ip job-tracker-ip)
+  "Configure Hadoop cluster, with custom properties. nn-tag is the
+  name-node tag... jt-tag is the job tracker tag."
+  [request nn-tag jt-tag ip-type properties & {:keys [version home]
+                                               :or {version default-version}}]
+  (let [home (or home (default-home version))
+        conf-dir (str home "/conf")
+        etc-conf-dir (stevedore/script
+                      (str (config-root) "/hadoop"))
+        nn-ip (get-master-ip request ip-type nn-tag)
+        jt-ip (get-master-ip request ip-type jt-tag)
+        pid-dir (stevedore/script (str (pid-root) "/hadoop"))
+        log-dir (stevedore/script (str (log-root) "/hadoop"))
+        defaults  (default-properties nn-ip jt-ip)
         properties (merge-config defaults properties)
-        tmpdir (get-in properties [:core-site :hadoop.tmp.dir])]
-    #_(println request)
+        tmp-dir (get-in properties [:core-site :hadoop.tmp.dir])]
     (->
      request
-     (directory/directory  tmpdir
-                           :owner owner
-                           :group group)
-     (config-files properties)
-     env-file
-     (file/symbolic-link (str owner-dir "/logs") log-dir))))
+     (for-> [path  [conf-dir tmp-dir log-dir pid-dir]]
+            (directory/directory path
+                                 :owner hadoop-user
+                                 :group hadoop-group
+                                 :mode "0755"))
+     (file/symbolic-link conf-dir etc-conf-dir)
+     (config-files conf-dir properties)
+     (env-file conf-dir log-dir pid-dir))))
 
 (script/defscript as-user [user & command])
 (stevedore/defimpl as-user :default [user & command]
@@ -421,8 +394,7 @@ INCOMPLETE - not yet ready for general use, but close!"
 (defn- hadoop-service
   "Run a Hadoop service"
   [request hadoop-daemon description]
-  (let [hadoop-home (hadoop-param request :home)
-        hadoop-user (hadoop-param request :owner)]
+  (let [hadoop-home (hadoop-param request :home)]
     (->
      request
      (exec-script/exec-checked-script
@@ -440,8 +412,7 @@ INCOMPLETE - not yet ready for general use, but close!"
   "Runs '$ hadoop ...' on each machine in the request. Command runs
   has the hadoop user."
   [request & args]
-  (let [hadoop-home (hadoop-param request :home)
-        hadoop-user (hadoop-param request :owner)]
+  (let [hadoop-home (hadoop-param request :home)]
     (->
      request
      (exec-script/exec-checked-script
@@ -455,8 +426,7 @@ INCOMPLETE - not yet ready for general use, but close!"
   "Formats HDFS for the first time. If HDFS has already been
   formatted, does nothing."
   [request]
-  (let [hadoop-home (hadoop-param request :home)
-        hadoop-user (hadoop-param request :owner)]
+  (let [hadoop-home (hadoop-param request :home)]
     (->
      request
      (exec-script/exec-script
