@@ -49,12 +49,23 @@ INCOMPLETE - not yet ready for general use, but close!"
 ;; G. Noll's [single node](http://goo.gl/8ogSk) and [multiple
 ;; node](http://goo.gl/NIWoK) hadoop cluster tutorials to be helpful.
 
-;; TODO -- why first? Why are we creating these as defaults?
+;; ### Defaults
+;;
+;; Here's a method for creating default directory names based on
+;;version, if you're so inclined.
 
+(defn versioned-home
+  "Default Hadoop location, based on version number."
+  [version]
+  (format "/usr/local/hadoop-%s" version))
+
+;; Sane defaults, until we implement defaults using the environment
+;; system.
+
+(def default-version "0.20.2")
+(def hadoop-home (versioned-home default-version))
 (def hadoop-user "hadoop")
 (def hadoop-group "hadoop")
-
-;; ### Utilities
 
 ;; ### Hadoop Utils
 
@@ -76,18 +87,11 @@ INCOMPLETE - not yet ready for general use, but close!"
    (for [[k v] (partition 2 kv-pairs)]
      (format "export %s=%s\n" (name k) v))))
 
-(defn hadoop-param
-  "Pulls the value referenced by the supplied key out of the supplied
-  hadoop cluster request map."
-  [request key]
-  (parameter/get-for-target request [:hadoop key]))
-
 ;; ### User Creation
 
-;; TODO -- abstract out the home string, here?
 (defn create-hadoop-user
   "Create the hadoop user"
-  [request hadoop-home]
+  [request]
   (let [jdk-home (stevedore/script (java/java-home))]
     (-> request
         (user/group hadoop-group :system true)
@@ -104,7 +108,8 @@ INCOMPLETE - not yet ready for general use, but close!"
                    :JAVA_HOME jdk-home
                    :PATH (format "$PATH:%s/bin" hadoop-home))))))
 
-;; TODO -- called from pallet cascalog. put somewhere else?
+;; This should only get called from the jobtracker.
+
 (defn publish-ssh-key
   "Sets up this node to be able passwordlessly ssh into the other
   nodes (slaves)"
@@ -157,6 +162,9 @@ INCOMPLETE - not yet ready for general use, but close!"
           :let [authorization [local-user group remote-user]]]
          (apply-> authorize-key authorization)))
 
+;; Public phase for allowing passwordless ssh access to all all nodes
+;; from the jobtracker.
+
 (defn authorize-jobtracker
   [request]
   (authorize-groups request
@@ -164,13 +172,7 @@ INCOMPLETE - not yet ready for general use, but close!"
                     {"jobtracker" [hadoop-user]}))
 
 ;; ### Installation
-
-(def default-version "0.20.2")
-(defn default-home
-  "Default Hadoop location, based on version number."
-  [version]
-  (format "/usr/local/hadoop-%s" version))
-
+;;
 (defn url
   "Download URL for the Apache distribution of Hadoop, generated for
   the supplied version."
@@ -181,14 +183,12 @@ INCOMPLETE - not yet ready for general use, but close!"
 
 (defn install
   "Initial hadoop installation."
-  [request & {:keys [version home]
-              :or {version default-version}}]
-  (let [url (url version)
-        home (or home (default-home version))]
+  [request]
+  (let [url (url default-version)]
     (->
      request
-     (create-hadoop-user home)
-     (remote-directory/remote-directory home
+     (create-hadoop-user)
+     (remote-directory/remote-directory hadoop-home
                                         :url url
                                         :md5-url (str url ".md5")
                                         :unpack :tar
@@ -315,6 +315,7 @@ INCOMPLETE - not yet ready for general use, but close!"
            (format "%s/%s.xml" config-dir (name filename))
            :content (properties->xml props)
            :owner hadoop-user :group hadoop-group))))
+
 (defn merge-config
   "Takes a map of Hadoop configuration options and merges in the
   supplied map of custom configuration options."
@@ -351,19 +352,11 @@ INCOMPLETE - not yet ready for general use, but close!"
              :private compute/private-ip
              :public compute/primary-ip) master))))
 
-;;todo -- if we have the same tag for both masters, here, does that
-;;help us?
-;;default-home?
-;; TODO -- modify pallet-cascalog to supply defaults?
-;; TODO -- check default properties -- we probably have to pull log,
-;;etc out
 (defn configure
   "Configure Hadoop cluster, with custom properties. nn-tag is the
   name-node tag... jt-tag is the job tracker tag."
-  [request nn-tag jt-tag ip-type properties & {:keys [version home]
-                                               :or {version default-version}}]
-  (let [home (or home (default-home version))
-        conf-dir (str home "/conf")
+  [request nn-tag jt-tag ip-type properties]
+  (let [conf-dir (str hadoop-home "/conf")
         etc-conf-dir (stevedore/script
                       (str (config-root) "/hadoop"))
         nn-ip (get-master-ip request ip-type nn-tag)
@@ -394,48 +387,45 @@ INCOMPLETE - not yet ready for general use, but close!"
 (defn- hadoop-service
   "Run a Hadoop service"
   [request hadoop-daemon description]
-  (let [hadoop-home (hadoop-param request :home)]
-    (->
-     request
-     (exec-script/exec-checked-script
-      (str "Start Hadoop " description)
-      (as-user
-       ~hadoop-user
-       ~(stevedore/script
-         (if-not (pipe (jps)
-                       (grep "-i" ~hadoop-daemon))
-           ((str ~hadoop-home "/bin/hadoop-daemon.sh")
-            "start"
-            ~hadoop-daemon))))))))
+  (->
+   request
+   (exec-script/exec-checked-script
+    (str "Start Hadoop " description)
+    (as-user
+     ~hadoop-user
+     ~(stevedore/script
+       (if-not (pipe (jps)
+                     (grep "-i" ~hadoop-daemon))
+         ((str ~hadoop-home "/bin/hadoop-daemon.sh")
+          "start"
+          ~hadoop-daemon)))))))
 
 (defn- hadoop-command
   "Runs '$ hadoop ...' on each machine in the request. Command runs
   has the hadoop user."
   [request & args]
-  (let [hadoop-home (hadoop-param request :home)]
-    (->
-     request
-     (exec-script/exec-checked-script
-      (apply str "hadoop " (interpose " " args))
-      (as-user
-       ~hadoop-user
-       (str ~hadoop-home "/bin/hadoop")
-       ~@args)))))
+  (->
+   request
+   (exec-script/exec-checked-script
+    (apply str "hadoop " (interpose " " args))
+    (as-user
+     ~hadoop-user
+     (str ~hadoop-home "/bin/hadoop")
+     ~@args))))
 
 (defn format-hdfs
   "Formats HDFS for the first time. If HDFS has already been
   formatted, does nothing."
   [request]
-  (let [hadoop-home (hadoop-param request :home)]
-    (->
-     request
-     (exec-script/exec-script
-      (as-user ~hadoop-user
-               (pipe
-                (echo "N")
-                ((str ~hadoop-home "/bin/hadoop")
-                 "namenode"
-                 "-format")))))))
+  (->
+   request
+   (exec-script/exec-script
+    (as-user ~hadoop-user
+             (pipe
+              (echo "N")
+              ((str ~hadoop-home "/bin/hadoop")
+               "namenode"
+               "-format"))))))
 
 ;; TODO -- think about the dfsadmin call, etc, that's happening
 ;; here. is that needed? Do we need to run this mkdir?
