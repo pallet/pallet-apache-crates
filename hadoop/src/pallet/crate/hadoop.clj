@@ -13,19 +13,12 @@
 ;; implied.  See the License for the specific language governing
 ;; permissions and limitations under the License.
 
-;; http://www.michael-noll.com/tutorials/running-hadoop-on-ubuntu-linux-multi-node-cluster/
-;; http://wiki.apache.org/hadoop/GettingStartedWithHadoop
-;; http://www.michael-noll.com/tutorials/running-hadoop-on-ubuntu-linux-single-node-cluster
-;; http://hadoop.apache.org/mapreduce/docs/current/mapred-default.html
-;; http://hadoop.apache.org/hdfs/docs/current/hdfs-default.html
-;; http://hadoop.apache.org/common/docs/current/cluster_setup.html#core-site.xml
-;; http://hadoop.apache.org/#What+Is+Hadoop%3F
-
 (ns pallet.crate.hadoop
   "Pallet crate to manage Hadoop installation and configuration.
 INCOMPLETE - not yet ready for general use, but close!"
   (:use [pallet.thread-expr :only (apply->)]
-        [pallet.resource :only (phase)])
+        [pallet.resource :only (phase)]
+        [clojure.contrib.def :only (name-with-attributes)])
   (:require [pallet.parameter :as parameter]
             [pallet.stevedore :as stevedore]
             [pallet.compute :as compute]
@@ -52,7 +45,17 @@ INCOMPLETE - not yet ready for general use, but close!"
 ;; G. Noll's [single node](http://goo.gl/8ogSk) and [multiple
 ;; node](http://goo.gl/NIWoK) hadoop cluster tutorials to be helpful.
 
-;; ### Defaults
+;; Other helpful links:
+;;
+;; http://www.michael-noll.com/tutorials/running-hadoop-on-ubuntu-linux-multi-node-cluster/
+;; http://wiki.apache.org/hadoop/GettingStartedWithHadoop
+;; http://www.michael-noll.com/tutorials/running-hadoop-on-ubuntu-linux-single-node-cluster
+;; http://hadoop.apache.org/mapreduce/docs/current/mapred-default.html
+;; http://hadoop.apache.org/hdfs/docs/current/hdfs-default.html
+;; http://hadoop.apache.org/common/docs/current/cluster_setup.html#core-site.xml
+;; http://hadoop.apache.org/#What+Is+Hadoop%3F
+
+;; ### Hadoop Defaults
 ;;
 ;; Here's a method for creating default directory names based on
 ;;version, if you're so inclined.
@@ -74,9 +77,11 @@ INCOMPLETE - not yet ready for general use, but close!"
 ;; TODO -- we can remove these, if Hugo adds them to pallet.
 
 (defmacro defphase
-  [name argvec & body]
-  `(def ~name
-     (phase-fn ~argvec ~@body)))
+  [name & rest]
+  (let [[name [argvec body]]
+        (name-with-attributes name rest)]
+    `(def ~name
+       (phase-fn ~argvec ~body))))
 
 (defmacro phase-fn
   [argvec & body]
@@ -105,6 +110,20 @@ INCOMPLETE - not yet ready for general use, but close!"
   [arg letvec & body]
   `(let ~letvec (-> ~arg ~@body)))
 
+(defmacro let-with-arg->
+  "A `let` form that can appear in a request thread, and assign the
+   value of the threaded arg.
+
+   eg.
+      (-> 1
+        (let-with-arg-> val [a 1]
+          (+ a val)))
+   => 3"
+  [arg arg-symbol binding & body]
+  `(let [~arg-symbol ~arg
+         ~@binding]
+     (-> ~arg-symbol ~@body)))
+
 ;; ### Hadoop Utils
 
 (defn format-exports
@@ -114,39 +133,39 @@ INCOMPLETE - not yet ready for general use, but close!"
    (for [[k v] (partition 2 kv-pairs)]
      (format "export %s=%s\n" (name k) v))))
 
-;; ### User Creation
+;; ## User Creation
+;;
+;; For the various nodes of a hadoop cluster to communicate with one
+;; another, it becomes necessary to create a common user account on
+;; every machine. For this iteration of the crate, we chose the
+;; user/group pair of `hadoop/hadoop`, as defined by `hadoop-user` and
+;; `hadoop-group`.
 
-(defn create-hadoop-user
-  "Create the hadoop user"
-  [request]
-  (let [jdk-home (stevedore/script (java/java-home))]
-    (-> request
-        (user/group hadoop-group :system true)
-        (user/user hadoop-user
-                   :system true
-                   :create-home true
-                   :shell :bash)
-        (remote-file/remote-file
-         (format "/home/%s/.bash_profile" hadoop-user)
-         :owner hadoop-user
-         :group hadoop-group
-         :literal true
-         :content (format-exports
-                   :JAVA_HOME jdk-home
-                   :PATH (format "$PATH:%s/bin" hadoop-home))))))
+(defphase create-hadoop-user
+  "Create a hadoop user on a cluster node. We add the hadoop binary
+  directory and a `JAVA_HOME` setting to `$PATH` to facilitate
+  development when manually logged in to some particular node."
+  []
+  (user/group hadoop-group :system true)
+  (user/user hadoop-user
+             :system true
+             :create-home true
+             :shell :bash)
+  (remote-file/remote-file
+   (format "/home/%s/.bash_profile" hadoop-user)
+   :owner hadoop-user
+   :group hadoop-group
+   :literal true
+   :content (format-exports
+             :JAVA_HOME (stevedore/script (java/java-home))
+             :PATH (format "$PATH:%s/bin" hadoop-home))))
 
-;; This should only get called from the jobtracker.
 
-(defn publish-ssh-key
-  "Sets up this node to be able passwordlessly ssh into the other
-  nodes (slaves)"
-  [request]
-  (let [id (request-map/target-id request)
-        tag (request-map/tag request)
-        key-name (format "%s_%s_key" tag id)]
-    (-> request
-        (ssh-key/generate-key hadoop-user :comment key-name)
-        (ssh-key/record-public-key hadoop-user))))
+;; Once the hadoop user is created, we need to create an ssh key for
+;; that user and share it around the cluster. The Jobtracker in
+;; particular needs the ability to ssh without a password into every
+;; cluster node running a task tracker. We assume in the following
+;; functions that this could be any node other than the jobtracker.
 
 (defn- get-node-ids-for-group
   "Get the id of the nodes in a group node"
@@ -155,7 +174,7 @@ INCOMPLETE - not yet ready for general use, but close!"
     (map compute/id nodes)))
 
 (defn- get-keys-for-group
-  "get the ssh for a user in a group"
+  "Returns the ssh key for a user in a group"
   [request tag user]
   (for [node (get-node-ids-for-group request tag)]
     (parameter/get-for request
@@ -179,8 +198,9 @@ INCOMPLETE - not yet ready for general use, but close!"
            [key keys]
            (ssh-key/authorize-key local-user key))))
 
+;; TODO -- add in docstring -- "Authorizes the master node to ssh into
+;; this node"
 (defn authorize-groups
-  "Authorizes the master node to ssh into this node"
   [request local-users tag-remote-users-map]
   (for-> request
          [local-user local-users
@@ -189,14 +209,25 @@ INCOMPLETE - not yet ready for general use, but close!"
           :let [authorization [local-user group remote-user]]]
          (apply-> authorize-key authorization)))
 
-;; Public phase for allowing passwordless ssh access to all all nodes
-;; from the jobtracker.
+;; In the current iteration, `publish-ssh-key` phase should only be
+;; called on the job-tracker, and will only work with a subsequent
+;; `authorize-jobtracker` phase on the same request.
 
-(defn authorize-jobtracker
-  [request]
-  (authorize-groups request
-                    [hadoop-user]
-                    {"jobtracker" [hadoop-user]}))
+(defphase publish-ssh-key
+  []
+  (let-with-arg-> request [id (request-map/target-id request)
+                           tag (request-map/tag request)
+                           key-name (format "%s_%s_key" tag id)]
+    (ssh-key/generate-key hadoop-user :comment key-name)
+    (ssh-key/record-public-key hadoop-user)))
+
+;; `authorize-jobtracker` 
+
+(defphase authorize-jobtracker
+  "configures all nodes to accept passwordless ssh requests from the
+  jobtracker."
+  []
+  (authorize-groups [hadoop-user] {"jobtracker" [hadoop-user]}))
 
 ;; ### Installation
 ;;
@@ -208,22 +239,22 @@ INCOMPLETE - not yet ready for general use, but close!"
    "http://www.apache.org/dist/hadoop/core/hadoop-%s/hadoop-%s.tar.gz"
    version version))
 
-(defn install
+(defphase install
   "Initial hadoop installation."
-  [request]
-  (let [url (url default-version)]
-    (->
-     request
-     (create-hadoop-user)
-     (remote-directory/remote-directory hadoop-home
-                                        :url url
-                                        :md5-url (str url ".md5")
-                                        :unpack :tar
-                                        :tar-options "xz"
-                                        :owner hadoop-user
-                                        :group hadoop-user))))
+  []
+  (let-> [url (url default-version)]
+         (create-hadoop-user)
+         (remote-directory/remote-directory hadoop-home
+                                            :url url
+                                            :md5-url (str url ".md5")
+                                            :unpack :tar
+                                            :tar-options "xz"
+                                            :owner hadoop-user
+                                            :group hadoop-user)))
 
-;; ### Configuration
+;; ## Configuration
+;;
+;;
 ;;
 ;; TODO -- talk about how we're providing facilities for printing the
 ;;configuration files out as XML. Talk a bit about how complicated
@@ -270,6 +301,11 @@ INCOMPLETE - not yet ready for general use, but close!"
        (map
         #(property->xml % (final-properties (key %)))
         properties)]))))
+
+;; As far as the next few functions are concerned, I believe Tom
+;; White, in the wonderful [Hadoop: The Definitive
+;; Guide](http://goo.gl/nPWWk), put it best: "Hadoop has a bewildering
+;; number of configuration properties".
 
 (defn default-properties
   "Returns a nested map of Hadoop default configuration properties,
@@ -336,19 +372,17 @@ INCOMPLETE - not yet ready for general use, but close!"
     :hadoop.rpc.socket.factory.class.ClientProtocol
     :hadoop.rpc.socket.factory.class.JobSubmissionProtocol})
 
-(defn config-files
+(defphase config-files
   "Accepts a base directory and a map of [config-filename,
 property-map] pairs, and augments the supplied request to allow for
 the creation of each referenced configuration file within the base
 directory."
-  [request config-dir properties]
-  (->
-   request
-   (for-> [[filename props] properties]
-          (remote-file/remote-file
-           (format "%s/%s.xml" config-dir (name filename))
-           :content (properties->xml props)
-           :owner hadoop-user :group hadoop-group))))
+  [config-dir properties]
+  (for-> [[filename props] properties]
+         (remote-file/remote-file
+          (format "%s/%s.xml" config-dir (name filename))
+          :content (properties->xml props)
+          :owner hadoop-user :group hadoop-group)))
 
 (defn merge-config
   "Merges two hadoop configuration option maps together, with the
@@ -359,19 +393,17 @@ directory."
            {name (merge props (name new-props))})))
 
 ;; TODO -- we need the ability to add custom properties, here!
-(defn env-file
+(defphase env-file
   "Phase that creates the `hadoop-env.sh` file with references to the
   supplied pid and log dirs. To `hadoop-env.sh` will be placed within the supplied config directory."
-  [request config-dir log-dir pid-dir]
-  (->
-   request
-   (remote-file/remote-file
-    (str config-dir "/hadoop-env.sh")
-    :content (format-exports
-              :HADOOP_PID_DIR pid-dir
-              :HADOOP_LOG_DIR log-dir
-              :HADOOP_SSH_OPTS "\"-o StrictHostKeyChecking=no\""
-              :HADOOP_OPTS "\"-Djava.net.preferIPv4Stack=true\""))))
+  [config-dir log-dir pid-dir]
+  (remote-file/remote-file
+   (str config-dir "/hadoop-env.sh")
+   :content (format-exports
+             :HADOOP_PID_DIR pid-dir
+             :HADOOP_LOG_DIR log-dir
+             :HADOOP_SSH_OPTS "\"-o StrictHostKeyChecking=no\""
+             :HADOOP_OPTS "\"-Djava.net.preferIPv4Stack=true\"")))
 
 (defn get-master-ip
   "Returns the IP address of a particular type of master node,
@@ -394,7 +426,7 @@ directory."
 ;; defaults with the pid-dir and log-dir described below, and pull
 ;; them out of the properties map, like we do with tmp-dir.
 
-(defn configure
+(defphase configure
   "Configures a Hadoop cluster by creating all required default
   directories, and populating the proper configuration file
   options. The `properties` parameter must be a map of the form
@@ -404,27 +436,25 @@ directory."
      :mapred-site {:key val ...}}
 
   No other top-level keys are supported at this time."
-  [request namenode-tag jobtracker-tag ip-type properties]
-  (let [conf-dir (str hadoop-home "/conf")
-        etc-conf-dir (stevedore/script
-                      (str (config-root) "/hadoop"))
-        nn-ip (get-master-ip request ip-type namenode-tag)
-        jt-ip (get-master-ip request ip-type jobtracker-tag)
-        pid-dir (stevedore/script (str (pid-root) "/hadoop"))
-        log-dir (stevedore/script (str (log-root) "/hadoop"))
-        defaults  (default-properties nn-ip jt-ip)
-        properties (merge-config defaults properties)
-        tmp-dir (get-in properties [:core-site :hadoop.tmp.dir])]
-    (->
-     request
-     (for-> [path  [conf-dir tmp-dir log-dir pid-dir]]
-            (directory/directory path
-                                 :owner hadoop-user
-                                 :group hadoop-group
-                                 :mode "0755"))
-     (file/symbolic-link conf-dir etc-conf-dir)
-     (config-files conf-dir properties)
-     (env-file conf-dir log-dir pid-dir))))
+  [namenode-tag jobtracker-tag ip-type properties]
+  (let-with-arg-> request [conf-dir (str hadoop-home "/conf")
+                           etc-conf-dir (stevedore/script
+                                         (str (config-root) "/hadoop"))
+                           nn-ip (get-master-ip request ip-type namenode-tag)
+                           jt-ip (get-master-ip request ip-type jobtracker-tag)
+                           pid-dir (stevedore/script (str (pid-root) "/hadoop"))
+                           log-dir (stevedore/script (str (log-root) "/hadoop"))
+                           defaults  (default-properties nn-ip jt-ip)
+                           properties (merge-config defaults properties)
+                           tmp-dir (get-in properties [:core-site :hadoop.tmp.dir])]
+    (for-> [path  [conf-dir tmp-dir log-dir pid-dir]]
+           (directory/directory path
+                                :owner hadoop-user
+                                :group hadoop-group
+                                :mode "0755"))
+    (file/symbolic-link conf-dir etc-conf-dir)
+    (config-files conf-dir properties)
+    (env-file conf-dir log-dir pid-dir)))
 
 (script/defscript as-user [user & command])
 (stevedore/defimpl as-user :default [user & command]
@@ -433,48 +463,42 @@ directory."
 (stevedore/defimpl as-user [#{:yum}] [user & command]
   ("/sbin/runuser" -s "/bin/bash" - ~user -c ~@command))
 
-(defn- hadoop-service
+(defphase hadoop-service
   "Run a Hadoop service"
-  [request hadoop-daemon description]
-  (->
-   request
-   (exec-script/exec-checked-script
-    (str "Start Hadoop " description)
-    (as-user
-     ~hadoop-user
-     ~(stevedore/script
-       (if-not (pipe (jps)
-                     (grep "-i" ~hadoop-daemon))
-         ((str ~hadoop-home "/bin/hadoop-daemon.sh")
-          "start"
-          ~hadoop-daemon)))))))
+  [hadoop-daemon description]
+  (exec-script/exec-checked-script
+   (str "Start Hadoop " description)
+   (as-user
+    ~hadoop-user
+    ~(stevedore/script
+      (if-not (pipe (jps)
+                    (grep "-i" ~hadoop-daemon))
+        ((str ~hadoop-home "/bin/hadoop-daemon.sh")
+         "start"
+         ~hadoop-daemon))))))
 
-(defn- hadoop-command
+(defphase hadoop-command
   "Runs '$ hadoop ...' on each machine in the request. Command runs
   has the hadoop user."
-  [request & args]
-  (->
-   request
-   (exec-script/exec-checked-script
-    (apply str "hadoop " (interpose " " args))
-    (as-user
-     ~hadoop-user
-     (str ~hadoop-home "/bin/hadoop")
-     ~@args))))
+  [& args]
+  (exec-script/exec-checked-script
+   (apply str "hadoop " (interpose " " args))
+   (as-user
+    ~hadoop-user
+    (str ~hadoop-home "/bin/hadoop")
+    ~@args)))
 
-(defn format-hdfs
+(defphase format-hdfs
   "Formats HDFS for the first time. If HDFS has already been
   formatted, does nothing."
-  [request]
-  (->
-   request
-   (exec-script/exec-script
-    (as-user ~hadoop-user
-             (pipe
-              (echo "N")
-              ((str ~hadoop-home "/bin/hadoop")
-               "namenode"
-               "-format"))))))
+  []
+  (exec-script/exec-script
+   (as-user ~hadoop-user
+            (pipe
+             (echo "N")
+             ((str ~hadoop-home "/bin/hadoop")
+              "namenode"
+              "-format")))))
 
 ;; TODO -- think about the dfsadmin call, etc, that's happening
 ;; here. is that needed? Do we need to run this mkdir?
