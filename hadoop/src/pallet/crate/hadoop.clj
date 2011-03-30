@@ -52,11 +52,6 @@ INCOMPLETE - not yet ready for general use, but close!"
 ;; G. Noll's [single node](http://goo.gl/8ogSk) and [multiple
 ;; node](http://goo.gl/NIWoK) hadoop cluster tutorials to be helpful.
 
-;; ### Utilities
-
-;; TODO -- finish defphase, so it will allow one to supply a vector
-;; arguments into the phase, rather than just defining a phase anonymously.
-
 ;; ### Defaults
 ;;
 ;; Here's a method for creating default directory names based on
@@ -98,6 +93,17 @@ INCOMPLETE - not yet ready for general use, but close!"
                      (-> arg#
                          ~body-expr)))))
     ~arg))
+
+(defmacro let->
+  "Allows binding of variables in a threading expression. For example:
+
+ (-> 5
+    (let-> [x 10]
+           (for-> [y (range 4)
+                   z (range 2)] (+ x y z))))
+ ;=> 101"
+  [arg letvec & body]
+  `(let ~letvec (-> ~arg ~@body)))
 
 ;; ### Hadoop Utils
 
@@ -352,9 +358,10 @@ directory."
          (for [[name props] default-props]
            {name (merge props (name new-props))})))
 
-;; TODO -- pick up documentation efforts.
+;; TODO -- we need the ability to add custom properties, here!
 (defn env-file
-  ""
+  "Phase that creates the `hadoop-env.sh` file with references to the
+  supplied pid and log dirs. To `hadoop-env.sh` will be placed within the supplied config directory."
   [request config-dir log-dir pid-dir]
   (->
    request
@@ -368,8 +375,8 @@ directory."
 
 (defn get-master-ip
   "Returns the IP address of a particular type of master node,
-  as defined by tag. IP-type can be `:private` or `:public`. Logs a
-  warning if more than one master exists."
+  as defined by tag. IP-type can be `:private` or `:public`. Function
+  logs a warning if more than one master exists."
   [request ip-type tag]
   {:pre [(contains? #{:public :private} ip-type)]}
   (let [[master :as nodes] (request-map/nodes-in-tag request tag)
@@ -382,15 +389,27 @@ directory."
              :private compute/private-ip
              :public compute/primary-ip) master))))
 
+;; TODO -- Are we setting references to pid-dir and log-dir in the
+;; configuration files? If so, we're going to need to override those
+;; defaults with the pid-dir and log-dir described below, and pull
+;; them out of the properties map, like we do with tmp-dir.
+
 (defn configure
-  "Configure Hadoop cluster, with custom properties. nn-tag is the
-  name-node tag... jt-tag is the job tracker tag."
-  [request nn-tag jt-tag ip-type properties]
+  "Configures a Hadoop cluster by creating all required default
+  directories, and populating the proper configuration file
+  options. The `properties` parameter must be a map of the form
+
+    {:core-site {:key val...}
+     :hdfs-site {:key val ...}
+     :mapred-site {:key val ...}}
+
+  No other top-level keys are supported at this time."
+  [request namenode-tag jobtracker-tag ip-type properties]
   (let [conf-dir (str hadoop-home "/conf")
         etc-conf-dir (stevedore/script
                       (str (config-root) "/hadoop"))
-        nn-ip (get-master-ip request ip-type nn-tag)
-        jt-ip (get-master-ip request ip-type jt-tag)
+        nn-ip (get-master-ip request ip-type namenode-tag)
+        jt-ip (get-master-ip request ip-type jobtracker-tag)
         pid-dir (stevedore/script (str (pid-root) "/hadoop"))
         log-dir (stevedore/script (str (log-root) "/hadoop"))
         defaults  (default-properties nn-ip jt-ip)
