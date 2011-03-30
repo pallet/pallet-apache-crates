@@ -17,7 +17,6 @@
   "Pallet crate to manage Hadoop installation and configuration.
 INCOMPLETE - not yet ready for general use, but close!"
   (:use [pallet.thread-expr :only (apply->)]
-        [pallet.resource :only (phase)]
         [clojure.contrib.def :only (name-with-attributes)])
   (:require [pallet.parameter :as parameter]
             [pallet.stevedore :as stevedore]
