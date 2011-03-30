@@ -52,6 +52,11 @@ INCOMPLETE - not yet ready for general use, but close!"
 ;; G. Noll's [single node](http://goo.gl/8ogSk) and [multiple
 ;; node](http://goo.gl/NIWoK) hadoop cluster tutorials to be helpful.
 
+;; ### Utilities
+
+;; TODO -- finish defphase, so it will allow one to supply a vector
+;; arguments into the phase, rather than just defining a phase anonymously.
+
 ;; ### Defaults
 ;;
 ;; Here's a method for creating default directory names based on
@@ -70,9 +75,20 @@ INCOMPLETE - not yet ready for general use, but close!"
 (def hadoop-user "hadoop")
 (def hadoop-group "hadoop")
 
-;; ### Hadoop Utils
+;; ### Pallet Utils
+;; TODO -- we can remove these, if Hugo adds them to pallet.
 
-;; TODO -- we can remove this, when Hugo adds it to pallet.
+(defmacro defphase
+  [name argvec & body]
+  `(def ~name
+     (phase-fn ~argvec ~@body)))
+
+(defmacro phase-fn
+  [argvec & body]
+  `(fn [request# ~@argvec]
+     (-> request#
+         ~@body)))
+
 (defmacro for->
   "Custom version of for->, with support for destructuring."
   [arg seq-exprs body-expr]
@@ -82,6 +98,8 @@ INCOMPLETE - not yet ready for general use, but close!"
                      (-> arg#
                          ~body-expr)))))
     ~arg))
+
+;; ### Hadoop Utils
 
 (defn format-exports
   "Formats `export` lines for inclusion in a shell script."
@@ -200,10 +218,56 @@ INCOMPLETE - not yet ready for general use, but close!"
                                         :group hadoop-user))))
 
 ;; ### Configuration
+;;
+;; TODO -- talk about how we're providing facilities for printing the
+;;configuration files out as XML. Talk a bit about how complicated
+;;configuration can be, in the hadoop environment.
+
+(defn ppxml
+  "Accepts an XML string with no newline formatting and returns the
+ same XML with pretty-print formatting, as described by Nurullah Akaya
+ in [this post](http://goo.gl/Y9OVO)."
+  [xml-str]
+  (let [in  (StreamSource. (StringReader. xml-str))
+        out (StreamResult. (StringWriter.))
+        transformer (.newTransformer
+                     (TransformerFactory/newInstance))]
+    (doseq [[prop val] {OutputKeys/INDENT "yes"
+                        OutputKeys/METHOD "xml"
+                        "{http://xml.apache.org/xslt}indent-amount" "2"}]
+      (.setOutputProperty transformer prop val))
+    (.transform transformer in out)
+    (str (.getWriter out))))
+
+(defn property->xml
+  "Returns a nested sequence representing the XML for a hadoop
+  configuration property. if `final?` is true, `<final>true</final>`
+  is added to the XML entry, preventing any hadoop job from overriding
+  the property."
+  [property final?]
+  [:property (filter
+              identity
+              [[:name {} (name (key property))]
+               [:value {} (val property)]
+               (when final?
+                 [:final {} "true"])])])
+
+(defn properties->xml
+  "Converts a map of [property value] entries into a string of XML
+  with pretty-print formatting."
+  [properties]
+  (ppxml
+   (with-out-str
+     (prxml/prxml
+      [:decl! {:version "1.0"}]
+      [:configuration
+       (map
+        #(property->xml % (final-properties (key %)))
+        properties)]))))
 
 (defn default-properties
-  "Returns a nested map of default properties, named according to the
-  0.20 api."
+  "Returns a nested map of Hadoop default configuration properties,
+  named according to the 0.20 api."
   [name-node-ip job-tracker-ip]
   (let [owner-dir (stevedore/script (user/user-home ~hadoop-user))
         owner-subdir (partial str owner-dir)]
@@ -266,46 +330,11 @@ INCOMPLETE - not yet ready for general use, but close!"
     :hadoop.rpc.socket.factory.class.ClientProtocol
     :hadoop.rpc.socket.factory.class.JobSubmissionProtocol})
 
-(defn ppxml
-  "XML pretty printing, as described at
-  http://nakkaya.com/2010/03/27/pretty-printing-xml-with-clojure/"
-  [xml]
-  (let [in  (StreamSource. (StringReader. xml))
-        out (StreamResult. (StringWriter.))
-        transformer (.newTransformer
-                     (TransformerFactory/newInstance))]
-    (doseq [[prop val] {OutputKeys/INDENT "yes"
-                        OutputKeys/METHOD "xml"
-                        "{http://xml.apache.org/xslt}indent-amount" "2"}]
-      (.setOutputProperty transformer prop val))
-    (.transform transformer in out)
-    (str (.getWriter out))))
-
-(defn property->xml
-  "Create a nested sequence representing the XML for a property."
-  [property final]
-  [:property
-   (filter
-    identity
-    [[:name {} (name (key property))]
-     [:value {} (val property)]
-     (when final
-       [:final {} "true"])])])
-
-(defn properties->xml
-  [properties]
-  (ppxml
-   (with-out-str
-     (prxml/prxml
-      [:decl! {:version "1.0"}]
-      [:configuration
-       (map
-        #(property->xml % (final-properties (key %)))
-        properties)]))))
-
 (defn config-files
-  "TODO -- Creates XML configuration files for hadoop, located in the
-  config directory."
+  "Accepts a base directory and a map of [config-filename,
+property-map] pairs, and augments the supplied request to allow for
+the creation of each referenced configuration file within the base
+directory."
   [request config-dir properties]
   (->
    request
@@ -316,14 +345,16 @@ INCOMPLETE - not yet ready for general use, but close!"
            :owner hadoop-user :group hadoop-group))))
 
 (defn merge-config
-  "Takes a map of Hadoop configuration options and merges in the
-  supplied map of custom configuration options."
+  "Merges two hadoop configuration option maps together, with the
+  entries in new-props taking precedence."
   [default-props new-props]
   (apply merge
          (for [[name props] default-props]
            {name (merge props (name new-props))})))
 
+;; TODO -- pick up documentation efforts.
 (defn env-file
+  ""
   [request config-dir log-dir pid-dir]
   (->
    request
@@ -428,33 +459,21 @@ INCOMPLETE - not yet ready for general use, but close!"
 
 ;; TODO -- think about the dfsadmin call, etc, that's happening
 ;; here. is that needed? Do we need to run this mkdir?
-(defn name-node
-  "Run a Hadoop name node."
-  [request data-dir]
-  (->
-   request
-   (format-hdfs)
-   (hadoop-service "namenode" "Name Node")
-   (hadoop-command "dfsadmin" "-safemode" "wait")
-   (hadoop-command "fs" "-mkdir" data-dir)
-   (hadoop-command "fs" "-chmod" "+w" data-dir)))
+(defphase name-node [data-dir]
+  (format-hdfs)
+  (hadoop-service "namenode" "Name Node")
+  (hadoop-command "dfsadmin" "-safemode" "wait")
+  (hadoop-command "fs" "-mkdir" data-dir)
+  (hadoop-command "fs" "-chmod" "+w" data-dir))
 
-(defn secondary-name-node
-  "Run a Hadoop secondary name node"
-  [request]
-  (hadoop-service request "secondarynamenode" "secondary name node"))
+(defphase secondary-name-node []
+  (hadoop-service "secondarynamenode" "secondary name node"))
 
-(defn job-tracker
-  "Run a Hadoop job tracker"
-  [request]
-  (hadoop-service request "jobtracker" "job tracker"))
+(defphase job-tracker []
+  (hadoop-service "jobtracker" "job tracker"))
 
-(defn data-node
-  "Run a Hadoop data node"
-  [request]
-  (hadoop-service request "datanode" "data node"))
+(defphase data-node []
+  (hadoop-service "datanode" "data node"))
 
-(defn task-tracker
-  "Run a Hadoop task tracker"
-  [request]
-  (hadoop-service request "tasktracker" "task tracker"))
+(defphase task-tracker []
+  (hadoop-service "tasktracker" "task tracker"))
