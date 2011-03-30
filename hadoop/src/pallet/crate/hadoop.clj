@@ -41,7 +41,10 @@ INCOMPLETE - not yet ready for general use, but close!"
             [clojure.contrib.prxml :as prxml]
             [clojure.string :as string]
             [clojure.contrib.logging :as log]
-            [pallet.crate.ssh-key :as ssh-key]))
+            [pallet.crate.ssh-key :as ssh-key])
+  (:import [java.io StringReader StringWriter]
+           [javax.xml.transform TransformerFactory OutputKeys]
+           [javax.xml.transform.stream StreamSource StreamResult]))
 
 ;; This crate contains all information required to set up and
 ;; configure a fully functional installation of Apache's
@@ -69,7 +72,7 @@ INCOMPLETE - not yet ready for general use, but close!"
 
 ;; ### Hadoop Utils
 
-;; TODO -- we can remove this, when hugod adds it to pallet.
+;; TODO -- we can remove this, when Hugo adds it to pallet.
 (defmacro for->
   "Custom version of for->, with support for destructuring."
   [arg seq-exprs body-expr]
@@ -238,7 +241,7 @@ INCOMPLETE - not yet ready for general use, but close!"
                                          "org.apache.hadoop.io.compress.DefaultCodec,"
                                          "org.apache.hadoop.io.compress.GzipCodec")}}))
 
-;; TODO -- discuss what the hell these final properties are!
+;; TODO -- discuss final properties, here.
 
 (def final-properties
   #{:dfs.block.size
@@ -267,20 +270,16 @@ INCOMPLETE - not yet ready for general use, but close!"
   "XML pretty printing, as described at
   http://nakkaya.com/2010/03/27/pretty-printing-xml-with-clojure/"
   [xml]
-  (let [in (javax.xml.transform.stream.StreamSource.
-            (java.io.StringReader. xml))
-        writer (java.io.StringWriter.)
-        out (javax.xml.transform.stream.StreamResult. writer)
+  (let [in  (StreamSource. (StringReader. xml))
+        out (StreamResult. (StringWriter.))
         transformer (.newTransformer
-                     (javax.xml.transform.TransformerFactory/newInstance))]
-    (.setOutputProperty transformer
-                        javax.xml.transform.OutputKeys/INDENT "yes")
-    (.setOutputProperty transformer
-                        "{http://xml.apache.org/xslt}indent-amount" "2")
-    (.setOutputProperty transformer
-                        javax.xml.transform.OutputKeys/METHOD "xml")
+                     (TransformerFactory/newInstance))]
+    (doseq [[prop val] {OutputKeys/INDENT "yes"
+                        OutputKeys/METHOD "xml"
+                        "{http://xml.apache.org/xslt}indent-amount" "2"}]
+      (.setOutputProperty transformer prop val))
     (.transform transformer in out)
-    (-> out .getWriter .toString)))
+    (str (.getWriter out))))
 
 (defn property->xml
   "Create a nested sequence representing the XML for a property."
