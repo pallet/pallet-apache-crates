@@ -197,13 +197,13 @@ INCOMPLETE - not yet ready for general use, but close!"
    with an added safety call to `check-session` prior to each phase
    invocation."
   ([argvec] `(phase-fn ~argvec identity))
-  ([argvec func]
+  ([argvec & [subphase & left]]
      `(fn [session# ~@argvec]
         (--> session#
-             (check-session (str "The session passed into " '~func))
-             ~func)))
-  ([argvec func & more]
-     `(comp (phase-fn ~argvec ~@more) (phase-fn ~argvec ~func))))
+             ~subphase
+             (check-session (str "The session passed out of" '~subphase))
+             ~@(when left
+                 [`((phase-fn ~argvec ~@left))])))))
 
 ;; TODO -- Support for various arg lists?
 (defmacro defphase
@@ -335,7 +335,7 @@ INCOMPLETE - not yet ready for general use, but close!"
   "Initial hadoop installation."
   []
   (let [url (url default-version)]
-    (create-hadoop-user)
+    create-hadoop-user
     (remote-directory/remote-directory hadoop-home
                                        :url url
                                        :md5-url (str url ".md5")
