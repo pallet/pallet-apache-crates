@@ -33,7 +33,9 @@ INCOMPLETE - not yet ready for general use, but close!"
             [clojure.contrib.prxml :as prxml]
             [clojure.string :as string]
             [clojure.contrib.logging :as log]
-            [pallet.crate.ssh-key :as ssh-key])
+            [pallet.crate.ssh-key :as ssh-key]
+            [clojure.contrib.condition :as condition]
+            [clojure.contrib.macro-utils :as macro])
   (:import [java.io StringReader StringWriter]
            [javax.xml.transform TransformerFactory OutputKeys]
            [javax.xml.transform.stream StreamSource StreamResult]))
@@ -75,18 +77,7 @@ INCOMPLETE - not yet ready for general use, but close!"
 ;; ### Pallet Utils
 ;; TODO -- we can remove these, if Hugo adds them to pallet.
 
-(defmacro defphase
-  [name & rest]
-  (let [[name [argvec body]]
-        (name-with-attributes name rest)]
-    `(def ~name
-       (phase-fn ~argvec ~body))))
-
-(defmacro phase-fn
-  [argvec & body]
-  `(fn [request# ~@argvec]
-     (-> request#
-         ~@body)))
+;; #### Threading Macros
 
 (defmacro for->
   "Custom version of for->, with support for destructuring."
@@ -99,7 +90,8 @@ INCOMPLETE - not yet ready for general use, but close!"
     ~arg))
 
 (defmacro let->
-  "Allows binding of variables in a threading expression. For example:
+  "Allows binding of variables in a threading expression, with support
+  for destructuring. For example:
 
  (-> 5
     (let-> [x 10]
@@ -108,6 +100,12 @@ INCOMPLETE - not yet ready for general use, but close!"
  ;=> 101"
   [arg letvec & body]
   `(let ~letvec (-> ~arg ~@body)))
+
+(defmacro arg->
+  "Unearths the threading argument for use inside the body."
+  [arg [sym] & body]
+  `(let [~sym ~arg]
+     (-> ~sym ~@body)))
 
 (defmacro let-with-arg->
   "A `let` form that can appear in a request thread, and assign the
@@ -122,6 +120,99 @@ INCOMPLETE - not yet ready for general use, but close!"
   `(let [~arg-symbol ~arg
          ~@binding]
      (-> ~arg-symbol ~@body)))
+
+(defmacro -->
+  "Similar to `clojure.core/->`, but includes symbol macros  for `when`,
+  `let` and `for` commands on the internal threading expressions."
+  [& forms]
+  `(macro/symbol-macrolet
+    [~'when pallet.thread-expr/when->
+     ~'for for->
+     ~'let let->
+     ~'expose-request-as arg->]
+    (-> ~@forms)))
+
+;; #### Phase Macros
+
+;; TODO -- Look at the second phasefn, here, and make sure that we
+;; have a good way of ensuring that the first item is the argvec.
+
+;; This is Hugo Duncan's method from pallet 0.5.0... We include it here to
+;; support our new version of phase-fn, without explicitly upgrading
+;; everything.
+
+(defn check-session
+  "Function that can check a session map to ensure it is a valid part of
+   phase definiton. It returns the session map.
+
+   If this fails, then it is likely that you have an incorrect crate function,
+   which is failing to return its session map properly, or you have a non crate
+   function in the phase defintion."
+  ([session]
+     ;; we do not use a precondition in order to improve the error message
+     (when-not (and session (map? session))
+       (condition/raise
+        :type :invalid-session
+        :message
+        "Invalid session map in phase. Check for non crate functions,
+      improper crate functions, or problems in threading the session map
+      in your phase definition.
+
+      A crate function is a function that takes a session map and other
+      arguments, and returns a modified session map. Calls to crate functions
+      are often wrapped in a threading macro, -> or pallet.phase/phase-fn,
+      to simplify chaining of the session map argument."))
+     session)
+  ([session form]
+     ;; we do not use a precondition in order to improve the error message
+     (when-not (and session (map? session))
+       (condition/raise
+        :type :invalid-session
+        :message
+        (format
+         (str
+          "Invalid session map in phase session.\n"
+          "`session` is %s\n"
+          "Problem probably caused in:\n  %s ")
+         session form)))
+     session))
+
+(defmacro phase-fn
+  "Composes a phase function from a sequence of phases by threading an
+ implicit phase session parameter through each. Each phase will have
+ access to the parameters passed in through `phase-fn`'s argument
+ vector. thus,
+
+    (phase-fn [filename]
+         (file filename)
+         (file \"/other-file\"))
+
+   is equivalent to:
+
+   (fn [session filename]
+     (-> session
+         (file filename)
+         (file \"/other-file\")))
+  
+   with an added safety call to `check-session` prior to each phase
+   invocation."
+  ([argvec] `(phase-fn ~argvec identity))
+  ([argvec func]
+     `(fn [session# ~@argvec]
+        (--> session#
+             (check-session (str "The session passed into " '~func))
+             ~func)))
+  ([argvec func & more]
+     `(comp (phase-fn ~argvec ~@more) (phase-fn ~argvec ~func))))
+
+;; TODO -- Support for various arg lists?
+(defmacro defphase
+  "Binds a `phase-fn` to the supplied name."
+  [name & rest]
+  (let [[name [argvec body]]
+        (name-with-attributes name rest)]
+    `(def ~name
+       (phase-fn ~argvec ~body))))
 
 ;; ### Hadoop Utils
 
@@ -214,11 +305,13 @@ INCOMPLETE - not yet ready for general use, but close!"
 
 (defphase publish-ssh-key
   []
-  (let-with-arg-> request [id (request-map/target-id request)
-                           tag (request-map/tag request)
-                           key-name (format "%s_%s_key" tag id)]
-    (ssh-key/generate-key hadoop-user :comment key-name)
-    (ssh-key/record-public-key hadoop-user)))
+  (expose-request-as
+   [request]
+   (let [id (request-map/target-id request)
+         tag (request-map/tag request)
+         key-name (format "%s_%s_key" tag id)]
+     (ssh-key/generate-key hadoop-user :comment key-name)
+     (ssh-key/record-public-key hadoop-user))))
 
 ;; `authorize-jobtracker` 
 
@@ -241,15 +334,15 @@ INCOMPLETE - not yet ready for general use, but close!"
 (defphase install
   "Initial hadoop installation."
   []
-  (let-> [url (url default-version)]
-         (create-hadoop-user)
-         (remote-directory/remote-directory hadoop-home
-                                            :url url
-                                            :md5-url (str url ".md5")
-                                            :unpack :tar
-                                            :tar-options "xz"
-                                            :owner hadoop-user
-                                            :group hadoop-user)))
+  (let [url (url default-version)]
+    (create-hadoop-user)
+    (remote-directory/remote-directory hadoop-home
+                                       :url url
+                                       :md5-url (str url ".md5")
+                                       :unpack :tar
+                                       :tar-options "xz"
+                                       :owner hadoop-user
+                                       :group hadoop-user)))
 
 ;; ## Configuration
 ;;
@@ -377,11 +470,11 @@ property-map] pairs, and augments the supplied request to allow for
 the creation of each referenced configuration file within the base
 directory."
   [config-dir properties]
-  (for-> [[filename props] properties]
-         (remote-file/remote-file
-          (format "%s/%s.xml" config-dir (name filename))
-          :content (properties->xml props)
-          :owner hadoop-user :group hadoop-group)))
+  (for [[filename props] properties]
+    (remote-file/remote-file
+     (format "%s/%s.xml" config-dir (name filename))
+     :content (properties->xml props)
+     :owner hadoop-user :group hadoop-group)))
 
 (defn merge-config
   "Merges two hadoop configuration option maps together, with the
@@ -436,24 +529,26 @@ directory."
 
   No other top-level keys are supported at this time."
   [namenode-tag jobtracker-tag ip-type properties]
-  (let-with-arg-> request [conf-dir (str hadoop-home "/conf")
-                           etc-conf-dir (stevedore/script
-                                         (str (config-root) "/hadoop"))
-                           nn-ip (get-master-ip request ip-type namenode-tag)
-                           jt-ip (get-master-ip request ip-type jobtracker-tag)
-                           pid-dir (stevedore/script (str (pid-root) "/hadoop"))
-                           log-dir (stevedore/script (str (log-root) "/hadoop"))
-                           defaults  (default-properties nn-ip jt-ip)
-                           properties (merge-config defaults properties)
-                           tmp-dir (get-in properties [:core-site :hadoop.tmp.dir])]
-    (for-> [path  [conf-dir tmp-dir log-dir pid-dir]]
-           (directory/directory path
-                                :owner hadoop-user
-                                :group hadoop-group
-                                :mode "0755"))
-    (file/symbolic-link conf-dir etc-conf-dir)
-    (config-files conf-dir properties)
-    (env-file conf-dir log-dir pid-dir)))
+  (expose-request-as
+   [request]
+   (let [conf-dir (str hadoop-home "/conf")
+         etc-conf-dir (stevedore/script
+                       (str (config-root) "/hadoop"))
+         nn-ip (get-master-ip request ip-type namenode-tag)
+         jt-ip (get-master-ip request ip-type jobtracker-tag)
+         pid-dir (stevedore/script (str (pid-root) "/hadoop"))
+         log-dir (stevedore/script (str (log-root) "/hadoop"))
+         defaults  (default-properties nn-ip jt-ip)
+         properties (merge-config defaults properties)
+         tmp-dir (get-in properties [:core-site :hadoop.tmp.dir])]
+     (for [path  [conf-dir tmp-dir log-dir pid-dir]]
+       (directory/directory path
+                            :owner hadoop-user
+                            :group hadoop-group
+                            :mode "0755"))
+     (file/symbolic-link conf-dir etc-conf-dir)
+     (config-files conf-dir properties)
+     (env-file conf-dir log-dir pid-dir))))
 
 (script/defscript as-user [user & command])
 (stevedore/defimpl as-user :default [user & command]
