@@ -233,19 +233,6 @@ INCOMPLETE - not yet ready for general use, but close!"
                   ~@(when left#
                       [`((~'~macro-name ~argvec# ~@left#) ~@argvec#)])))))))
 
-(fn [session x y a]
-  (--> session
-       (+ x)
-       (check-session (str (quote (+ x))))
-       ((phase-fn [x y a] (+ y) (+ 4) (+ a)) x y a)))
-
-(macroexpand '(phase-fn [x y a] (+ a)))
-(fn [session x y a]
-  (--> session
-       (+ a)
-       (check-session (clojure.core/str (quote (+ a))))))
-
-
 (defthreader phase-fn
   "Composes a phase function from a sequence of phases by threading an
  implicit phase session parameter through each. Each phase will have
