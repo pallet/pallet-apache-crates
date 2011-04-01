@@ -84,9 +84,8 @@ INCOMPLETE - not yet ready for general use, but close!"
   [arg seq-exprs body-expr]
   `((apply comp (reverse
                  (for ~seq-exprs
-                   (fn [arg#]
-                     (-> arg#
-                         ~body-expr)))))
+                   (fn [param#]
+                     (-> param# ~body-expr)))))
     ~arg))
 
 (defmacro let->
@@ -101,11 +100,16 @@ INCOMPLETE - not yet ready for general use, but close!"
   [arg letvec & body]
   `(let ~letvec (-> ~arg ~@body)))
 
-(defmacro arg->
-  "Unearths the threading argument for use inside the body."
+(defmacro expose-arg->
+  "A threaded form that exposes the value of the threaded arg. For
+  example:
+
+    (-> 1
+      (expose-arg-> [arg]
+        (+ arg)))
+  ;=> 2"
   [arg [sym] & body]
-  `(let [~sym ~arg]
-     (-> ~sym ~@body)))
+  `(let [~sym ~arg] (-> ~sym ~@body)))
 
 (defmacro let-with-arg->
   "A `let` form that can appear in a request thread, and assign the
@@ -116,11 +120,12 @@ INCOMPLETE - not yet ready for general use, but close!"
         (let-with-arg-> val [a 1]
           (+ a val)))
    => 3"
-  [arg arg-symbol binding & body]
-  `(let [~arg-symbol ~arg
+  [arg sym binding & body]
+  `(let [~sym ~arg
          ~@binding]
-     (-> ~arg-symbol ~@body)))
+     (-> ~sym ~@body)))
 
+;; TODO -- add apply, if... what else?
 (defmacro -->
   "Similar to `clojure.core/->`, but includes symbol macros  for `when`,
   `let` and `for` commands on the internal threading expressions."
@@ -129,7 +134,7 @@ INCOMPLETE - not yet ready for general use, but close!"
     [~'when pallet.thread-expr/when->
      ~'for for->
      ~'let let->
-     ~'expose-request-as arg->]
+     ~'expose-request-as expose-arg->]
     (-> ~@forms)))
 
 ;; #### Phase Macros
@@ -177,6 +182,7 @@ INCOMPLETE - not yet ready for general use, but close!"
          session form)))
      session))
 
+;; Here's an older version of phase-fn.
 (defmacro phase-fn
   "Composes a phase function from a sequence of phases by threading an
  implicit phase session parameter through each. Each phase will have
@@ -197,13 +203,83 @@ INCOMPLETE - not yet ready for general use, but close!"
    with an added safety call to `check-session` prior to each phase
    invocation."
   ([argvec] `(phase-fn ~argvec identity))
-  ([argvec & [subphase & left]]
+  ([argvec subphase & left]
      `(fn [session# ~@argvec]
         (--> session#
              ~subphase
-             (check-session (str "The session passed out of" '~subphase))
+             (check-session (str "The session passed out of " '~subphase))
              ~@(when left
-                 [`((phase-fn ~argvec ~@left))])))))
+                 [`((phase-fn ~argvec ~@left) ~@argvec)])))))
+
+;; To qualify as a checker, a function must take two arguments -- the
+;; threaded argument, and a description of the form from which it's
+;; just returned.
+
+;; TODO -- have this thing do arglists properly.
+(defmacro defthreader
+  "Produces functions like `phase-fn` above, with the option for
+  custom checkers inserted after every threading call. `phase-fn`
+  becomes a special case."
+  [macro-name & rest]
+  (let [[macro-name checkers] (name-with-attributes macro-name rest)]
+    `(defmacro ~macro-name
+       ([argvec#] (~macro-name argvec# identity))
+       ([argvec# subphase# & left#]
+          `(fn [~'session# ~@argvec#]
+             (--> ~'session#
+                  ~subphase#
+                  ~@(for [func# '~checkers]
+                      `(~func# (str '~subphase#)))
+                  ~@(when left#
+                      [`((~'~macro-name ~argvec# ~@left#) ~@argvec#)])))))))
+
+(fn [session x y a]
+  (--> session
+       (+ x)
+       (check-session (str (quote (+ x))))
+       ((phase-fn [x y a] (+ y) (+ 4) (+ a)) x y a)))
+
+(macroexpand '(phase-fn [x y a] (+ a)))
+(fn [session x y a]
+  (--> session
+       (+ a)
+       (check-session (clojure.core/str (quote (+ a))))))
+
+
+(defthreader phase-fn
+  "Composes a phase function from a sequence of phases by threading an
+ implicit phase session parameter through each. Each phase will have
+ access to the parameters passed in through `phase-fn`'s argument
+ vector. thus,
+
+    (phase-fn [filename]
+         (file filename)
+         (file \"/other-file\"))
+
+   is equivalent to:
+
+   (fn [session filename]
+     (-> session
+         (file filename)
+         (file \"/other-file\")))
+  
+   with an added safety call to `check-session` prior to each phase
+   invocation."
+  check-session)
+
+(defthreader unchecked-phase-fn
+  "Unchecked version of `phase-fn`.
+
+   The following two forms are equivalent:
+
+   (unchecked-phase-fn [x y]
+       (+ x)
+       (+ y))
+
+   (fn [session x y]
+       (-> session
+           (+ x)
+           (+ y)))")
 
 ;; TODO -- Support for various arg lists?
 (defmacro defphase
@@ -281,6 +357,7 @@ INCOMPLETE - not yet ready for general use, but close!"
      (for-> [key keys]
             (ssh-key/authorize-key user key)))))
 
+;; TODO -- convert into phase -- define private phase?
 (defn- authorize-key
   [request local-user group remote-user]
   (let [keys (get-keys-for-group request group remote-user)]
@@ -288,9 +365,9 @@ INCOMPLETE - not yet ready for general use, but close!"
            [key keys]
            (ssh-key/authorize-key local-user key))))
 
-;; TODO -- add in docstring -- "Authorizes the master node to ssh into
-;; this node"
+;; TODO -- Convert into phase, after adding apply-> to -->.
 (defn authorize-groups
+  "Authorizes the master node to ssh into this node."
   [request local-users tag-remote-users-map]
   (for-> request
          [local-user local-users
@@ -312,8 +389,6 @@ INCOMPLETE - not yet ready for general use, but close!"
          key-name (format "%s_%s_key" tag id)]
      (ssh-key/generate-key hadoop-user :comment key-name)
      (ssh-key/record-public-key hadoop-user))))
-
-;; `authorize-jobtracker` 
 
 (defphase authorize-jobtracker
   "configures all nodes to accept passwordless ssh requests from the
@@ -380,6 +455,8 @@ INCOMPLETE - not yet ready for general use, but close!"
                [:value {} (val property)]
                (when final?
                  [:final {} "true"])])])
+
+(declare final-properties)
 
 (defn properties->xml
   "Converts a map of [property value] entries into a string of XML
@@ -596,7 +673,9 @@ directory."
 
 ;; TODO -- think about the dfsadmin call, etc, that's happening
 ;; here. is that needed? Do we need to run this mkdir?
-(defphase name-node [data-dir]
+(defphase name-node
+  "Collection of all subphases required for a namenode."
+  [data-dir]
   (format-hdfs)
   (hadoop-service "namenode" "Name Node")
   (hadoop-command "dfsadmin" "-safemode" "wait")
