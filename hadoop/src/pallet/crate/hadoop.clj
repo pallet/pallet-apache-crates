@@ -211,8 +211,8 @@ INCOMPLETE - not yet ready for general use, but close!"
           `(fn [~'session# ~@argvec#]
              (--> ~'session#
                   ~subphase#
-                  ~@(for [func# '~checkers]
-                      `(~func# (str '~subphase#)))
+                  ~@(for [func# ~(vec checkers)]
+                      (list func# (str subphase#)))
                   ~@(when left#
                       [`((~'~macro-name ~argvec# ~@left#) ~@argvec#)])))))))
 
@@ -249,10 +249,10 @@ INCOMPLETE - not yet ready for general use, but close!"
    (fn [session x y]
        (-> session
            (+ x)
-           (+ y)))") 
+           (+ y)))")
 
 ;; TODO -- Support for various arg lists?
-(defmacro defphase
+(defmacro def-phase-fn
   "Binds a `phase-fn` to the supplied name."
   [name & rest]
   (let [[name [argvec body]]
@@ -277,7 +277,7 @@ INCOMPLETE - not yet ready for general use, but close!"
 ;; user/group pair of `hadoop/hadoop`, as defined by `hadoop-user` and
 ;; `hadoop-group`.
 
-(defphase create-hadoop-user
+(def-phase-fn create-hadoop-user
   "Create a hadoop user on a cluster node. We add the hadoop binary
   directory and a `JAVA_HOME` setting to `$PATH` to facilitate
   development when manually logged in to some particular node."
@@ -287,14 +287,13 @@ INCOMPLETE - not yet ready for general use, but close!"
              :system true
              :create-home true
              :shell :bash)
-  (remote-file/remote-file
-   (format "/home/%s/.bash_profile" hadoop-user)
-   :owner hadoop-user
-   :group hadoop-group
-   :literal true
-   :content (format-exports
-             :JAVA_HOME (stevedore/script (java/java-home))
-             :PATH (format "$PATH:%s/bin" hadoop-home))))
+  (remote-file/remote-file (format "/home/%s/.bash_profile" hadoop-user)
+                           :owner hadoop-user
+                           :group hadoop-group
+                           :literal true
+                           :content (format-exports
+                                     :JAVA_HOME (stevedore/script (java/java-home))
+                                     :PATH (format "$PATH:%s/bin" hadoop-home))))
 
 
 ;; Once the hadoop user is created, we need to create an ssh key for
@@ -313,10 +312,9 @@ INCOMPLETE - not yet ready for general use, but close!"
   "Returns the ssh key for a user in a group"
   [request tag user]
   (for [node (get-node-ids-for-group request tag)]
-    (parameter/get-for request
-                       [:host (keyword node)
-                        :user (keyword user)
-                        :id_rsa])))
+    (parameter/get-for request [:host (keyword node)
+                                :user (keyword user)
+                                :id_rsa])))
 
 ;; TODO -- delete?
 #_(defn authorize-group
@@ -350,17 +348,16 @@ INCOMPLETE - not yet ready for general use, but close!"
 ;; called on the job-tracker, and will only work with a subsequent
 ;; `authorize-jobtracker` phase on the same request.
 
-(defphase publish-ssh-key
+(def-phase-fn publish-ssh-key
   []
-  (expose-request-as
-   [request]
+  (expose-request-as [request]
    (let [id (request-map/target-id request)
          tag (request-map/tag request)
          key-name (format "%s_%s_key" tag id)]
      (ssh-key/generate-key hadoop-user :comment key-name)
      (ssh-key/record-public-key hadoop-user))))
 
-(defphase authorize-jobtracker
+(def-phase-fn authorize-jobtracker
   "configures all nodes to accept passwordless ssh requests from the
   jobtracker."
   []
@@ -376,7 +373,7 @@ INCOMPLETE - not yet ready for general use, but close!"
    "http://www.apache.org/dist/hadoop/core/hadoop-%s/hadoop-%s.tar.gz"
    version version))
 
-(defphase install
+(def-phase-fn install
   "Initial hadoop installation."
   []
   (let [url (url default-version)]
@@ -511,7 +508,7 @@ INCOMPLETE - not yet ready for general use, but close!"
     :hadoop.rpc.socket.factory.class.ClientProtocol
     :hadoop.rpc.socket.factory.class.JobSubmissionProtocol})
 
-(defphase config-files
+(def-phase-fn config-files
   "Accepts a base directory and a map of [config-filename,
 property-map] pairs, and augments the supplied request to allow for
 the creation of each referenced configuration file within the base
@@ -532,7 +529,7 @@ directory."
            {name (merge props (name new-props))})))
 
 ;; TODO -- we need the ability to add custom properties, here!
-(defphase env-file
+(def-phase-fn env-file
   "Phase that creates the `hadoop-env.sh` file with references to the
   supplied pid and log dirs. To `hadoop-env.sh` will be placed within the supplied config directory."
   [config-dir log-dir pid-dir]
@@ -565,7 +562,7 @@ directory."
 ;; defaults with the pid-dir and log-dir described below, and pull
 ;; them out of the properties map, like we do with tmp-dir.
 
-(defphase configure
+(def-phase-fn configure
   "Configures a Hadoop cluster by creating all required default
   directories, and populating the proper configuration file
   options. The `properties` parameter must be a map of the form
@@ -604,7 +601,7 @@ directory."
 (stevedore/defimpl as-user [#{:yum}] [user & command]
   ("/sbin/runuser" -s "/bin/bash" - ~user -c ~@command))
 
-(defphase hadoop-service
+(def-phase-fn hadoop-service
   "Run a Hadoop service"
   [hadoop-daemon description]
   (exec-script/exec-checked-script
@@ -618,7 +615,7 @@ directory."
          "start"
          ~hadoop-daemon))))))
 
-(defphase hadoop-command
+(def-phase-fn hadoop-command
   "Runs '$ hadoop ...' on each machine in the request. Command runs
   has the hadoop user."
   [& args]
@@ -629,7 +626,7 @@ directory."
     (str ~hadoop-home "/bin/hadoop")
     ~@args)))
 
-(defphase format-hdfs
+(def-phase-fn format-hdfs
   "Formats HDFS for the first time. If HDFS has already been
   formatted, does nothing."
   []
@@ -643,7 +640,7 @@ directory."
 
 ;; TODO -- think about the dfsadmin call, etc, that's happening
 ;; here. is that needed? Do we need to run this mkdir?
-(defphase name-node
+(def-phase-fn name-node
   "Collection of all subphases required for a namenode."
   [data-dir]
   (format-hdfs)
@@ -652,14 +649,14 @@ directory."
   (hadoop-command "fs" "-mkdir" data-dir)
   (hadoop-command "fs" "-chmod" "+w" data-dir))
 
-(defphase secondary-name-node []
+(def-phase-fn secondary-name-node []
   (hadoop-service "secondarynamenode" "secondary name node"))
 
-(defphase job-tracker []
+(def-phase-fn job-tracker []
   (hadoop-service "jobtracker" "job tracker"))
 
-(defphase data-node []
+(def-phase-fn data-node []
   (hadoop-service "datanode" "data node"))
 
-(defphase task-tracker []
+(def-phase-fn task-tracker []
   (hadoop-service "tasktracker" "task tracker"))
