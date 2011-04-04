@@ -139,9 +139,6 @@ INCOMPLETE - not yet ready for general use, but close!"
 
 ;; #### Phase Macros
 
-;; TODO -- Look at the second phasefn, here, and make sure that we
-;; have a good way of ensuring that the first item is the argvec.
-
 (defn check-session
   "Function that can check a session map to ensure it is a valid part of
    phase definition. It returns the session map.
@@ -151,8 +148,8 @@ INCOMPLETE - not yet ready for general use, but close!"
    introduced the fault into the session; to aid in debugging, make
    sure to use `phase-fn` and `def-phase-fn` to build phases."
   [session form]
-  ;; we do not use a precondition in order to improve the error message
-  (when-not (and session (map? session))
+  (when (and session (map? session))
+    session
     (condition/raise
      :type :invalid-session
      :message
@@ -166,8 +163,7 @@ INCOMPLETE - not yet ready for general use, but close!"
       map and other arguments, and returns a modified session
       map. Calls to crate functions are often wrapped in a threading
       macro, -> or pallet.phase/phase-fn, to simplify chaining of the
-      session map argument.")))
-  session)
+      session map argument."))))
 
 ;; To qualify as a checker, a function must take two arguments -- the
 ;; threaded argument, and a description of the form from which it's
@@ -210,11 +206,11 @@ INCOMPLETE - not yet ready for general use, but close!"
        ([argvec# subphase# & left#]
           `(fn [~'session# ~@argvec#]
              (--> ~'session#
-                  ~subphase#
-                  ~@(for [func# ~(vec checkers)]
-                      (list func# (str subphase#)))
-                  ~@(when left#
-                      [`((~'~macro-name ~argvec# ~@left#) ~@argvec#)])))))))
+                 ~subphase#
+                 ~@(for [func# ~(vec checkers)]
+                     (list func# (str subphase#)))
+                 ~@(when left#
+                     [`((~'~macro-name ~argvec# ~@left#) ~@argvec#)])))))))
 
 (defthreadfn phase-fn
   "Composes a phase function from a sequence of phases by threading an
@@ -255,10 +251,10 @@ INCOMPLETE - not yet ready for general use, but close!"
 (defmacro def-phase-fn
   "Binds a `phase-fn` to the supplied name."
   [name & rest]
-  (let [[name [argvec body]]
+  (let [[name [argvec & body]]
         (name-with-attributes name rest)]
     `(def ~name
-       (phase-fn ~argvec ~body))))
+       (phase-fn ~argvec ~@body))))
 
 ;; ### Hadoop Utils
 
@@ -643,7 +639,7 @@ directory."
 (def-phase-fn name-node
   "Collection of all subphases required for a namenode."
   [data-dir]
-  (format-hdfs)
+  format-hdfs
   (hadoop-service "namenode" "Name Node")
   (hadoop-command "dfsadmin" "-safemode" "wait")
   (hadoop-command "fs" "-mkdir" data-dir)
