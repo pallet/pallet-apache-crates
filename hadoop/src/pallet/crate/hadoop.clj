@@ -80,13 +80,17 @@ INCOMPLETE - not yet ready for general use, but close!"
 ;; #### Threading Macros
 
 (defmacro for->
-  "Custom version of for->, with support for destructuring."
-  [arg seq-exprs body-expr]
-  `((apply comp (reverse
-                 (for ~seq-exprs
-                   (fn [param#]
-                     (-> param# ~body-expr)))))
-    ~arg))
+  "Apply a thread expression to a sequence.
+   eg.
+      (-> 1
+        (for-> [x [1 2 3]]
+          (+ x)))
+   => 7"
+  [arg seq-exprs & body]
+  `(reduce #(%2 %1)
+           ~arg
+           (for ~seq-exprs
+             (fn [arg#] (-> arg# ~@body)))))
 
 (defmacro let->
   "Allows binding of variables in a threading expression, with support
@@ -325,8 +329,7 @@ INCOMPLETE - not yet ready for general use, but close!"
 (defn- authorize-key
   [request local-user group remote-user]
   (let [keys (get-keys-for-group request group remote-user)]
-    (for-> request
-           [key keys]
+    (for-> request [key keys]
            (ssh-key/authorize-key local-user key))))
 
 ;; TODO -- Convert into phase, after adding apply-> to -->.
@@ -568,7 +571,7 @@ directory."
      :mapred-site {:key val ...}}
 
   No other top-level keys are supported at this time."
-  [namenode-tag jobtracker-tag ip-type properties]
+  [ip-type namenode-tag jobtracker-tag properties]
   (expose-request-as
    [request]
    (let [conf-dir (str hadoop-home "/conf")
