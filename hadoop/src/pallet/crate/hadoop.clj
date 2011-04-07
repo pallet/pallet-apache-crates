@@ -29,13 +29,13 @@ INCOMPLETE - not yet ready for general use, but close!"
             [pallet.resource.remote-file :as remote-file]
             [pallet.resource.user :as user]
             [pallet.script :as script]
-            [pallet.crate.java :as java]
             [clojure.contrib.prxml :as prxml]
             [clojure.string :as string]
             [clojure.contrib.logging :as log]
-            [pallet.crate.ssh-key :as ssh-key]
             [clojure.contrib.condition :as condition]
-            [clojure.contrib.macro-utils :as macro])
+            [clojure.contrib.macro-utils :as macro]
+            [pallet.crate.ssh-key :as ssh-key]
+            [pallet.crate.java :as java])
   (:import [java.io StringReader StringWriter]
            [javax.xml.transform TransformerFactory OutputKeys]
            [javax.xml.transform.stream StreamSource StreamResult]))
@@ -152,7 +152,7 @@ INCOMPLETE - not yet ready for general use, but close!"
    introduced the fault into the session; to aid in debugging, make
    sure to use `phase-fn` and `def-phase-fn` to build phases."
   [session form]
-  (when (and session (map? session))
+  (if (and session (map? session))
     session
     (condition/raise
      :type :invalid-session
