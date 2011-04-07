@@ -237,6 +237,12 @@ INCOMPLETE - not yet ready for general use, but close!"
    each phase invocation."
   check-session)
 
+(defmacro phase
+  "Equivalent to `phase-fn` with an empty argument vector. Placed for
+  purposes of comfort."
+  [& phases]
+  `(phase-fn [] ~@phases))
+
 (defthreadfn unchecked-phase-fn
   "Unchecked version of `phase-fn`.
 
