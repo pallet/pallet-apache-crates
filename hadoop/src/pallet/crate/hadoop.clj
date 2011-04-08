@@ -12,8 +12,7 @@
 ;; permissions and limitations under the License.
 
 (ns pallet.crate.hadoop
-  "Pallet crate to manage Hadoop installation and configuration.
-INCOMPLETE - not yet ready for general use, but close!"
+  "Pallet crate to manage Hadoop installation and configuration."
   (:use [clojure.contrib.def :only (name-with-attributes)]
         [pallet.thread-expr :only (apply->)])
   (:require [clojure.contrib.condition :as condition]
@@ -289,12 +288,14 @@ INCOMPLETE - not yet ready for general use, but close!"
 
 ;; Great! Now, on to Hadoop.
 
+;; ## Hadoop Configuration
+;;
 ;; This crate contains all information required to set up and
 ;; configure a fully functional installation of Apache's
 ;; Hadoop. Working through this crate, you might find Michael
 ;; G. Noll's [single node](http://goo.gl/8ogSk) and [multiple
 ;; node](http://goo.gl/NIWoK) hadoop cluster tutorials to be helpful.
-
+;;
 ;; Other helpful links:
 ;;
 ;; http://www.michael-noll.com/tutorials/running-hadoop-on-ubuntu-linux-multi-node-cluster/
@@ -386,16 +387,13 @@ INCOMPLETE - not yet ready for general use, but close!"
     (for-> request [key keys]
            (ssh-key/authorize-key local-user key))))
 
-;; TODO -- Convert into phase, after adding apply-> to -->.
-(defn authorize-groups
+(def-phase-fn authorize-groups
   "Authorizes the master node to ssh into this node."
-  [request local-users tag-remote-users-map]
-  (for-> request
-         [local-user local-users
-          [group remote-users] tag-remote-users-map
-          remote-user remote-users
-          :let [authorization [local-user group remote-user]]]
-         (apply-> authorize-key authorization)))
+  [local-users tag-remote-users-map]
+  (for [local-user local-users
+        [group remote-users] tag-remote-users-map
+        remote-user remote-users]
+    (authorize-key local-user group remote-user)))
 
 ;; In the current iteration, `publish-ssh-key` phase should only be
 ;; called on the job-tracker, and will only work with a subsequent
