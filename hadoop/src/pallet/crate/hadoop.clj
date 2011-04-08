@@ -286,45 +286,9 @@
   [& phases]
   `(phase-fn [] ~@phases))
 
-;; Great! Now, on to Hadoop.
-
-;; ## Hadoop Configuration
+;; #### General Utilities
 ;;
-;; This crate contains all information required to set up and
-;; configure a fully functional installation of Apache's
-;; Hadoop. Working through this crate, you might find Michael
-;; G. Noll's [single node](http://goo.gl/8ogSk) and [multiple
-;; node](http://goo.gl/NIWoK) hadoop cluster tutorials to be helpful.
-;;
-;; Other helpful links:
-;;
-;; http://www.michael-noll.com/tutorials/running-hadoop-on-ubuntu-linux-multi-node-cluster/
-;; http://wiki.apache.org/hadoop/GettingStartedWithHadoop
-;; http://www.michael-noll.com/tutorials/running-hadoop-on-ubuntu-linux-single-node-cluster
-;; http://hadoop.apache.org/mapreduce/docs/current/mapred-default.html
-;; http://hadoop.apache.org/hdfs/docs/current/hdfs-default.html
-;; http://hadoop.apache.org/common/docs/current/cluster_setup.html#core-site.xml
-;; http://hadoop.apache.org/#What+Is+Hadoop%3F
-
-;; ### Hadoop Defaults
-;;
-;; Here's a method for creating default directory names based on
-;;version, if you're so inclined.
-
-(defn versioned-home
-  "Default Hadoop location, based on version number."
-  [version]
-  (format "/usr/local/hadoop-%s" version))
-
-;; Sane defaults, until we implement defaults using the environment
-;; system.
-
-(def default-version "0.20.2")
-(def hadoop-home (versioned-home default-version))
-(def hadoop-user "hadoop")
-(def hadoop-group "hadoop")
-
-;; ### Hadoop Utils
+;; This one is generally quite useful, and may end up in stevedore.
 
 (defn format-exports
   "Formats `export` lines for inclusion in a shell script."
@@ -333,13 +297,59 @@
    (for [[k v] (partition 2 kv-pairs)]
      (format "export %s=%s\n" (name k) v))))
 
-;; ## User Creation
+;; Great! Now, on to Hadoop.
+
+;; ## Hadoop Configuration
+;;
+;; This crate contains all information required to set up and
+;; configure a fully functional installation of Apache's Hadoop. It
+;; seems that the biggest roadblock potential hadoop adopters face is
+;; the confounding, terrible multiplicity of possible
+;; configurations. Tom White, in the wonderful [Hadoop: The Definitive
+;; Guide](http://goo.gl/nPWWk), states the case well: "Hadoop has a
+;; bewildering number of configuration properties".
+;;
+;; We aim to provide sane, intelligent defaults that adjust themselves
+;; based on a given cluster's size and particular distribution of
+;; machines.
+;;
+;; The following phases are informed to some degree by Hadoop's
+;; official [Getting Started](http://goo.gl/Bh4zU) page... I have to
+;; say, though, Michael G. Noll's [single node](http://goo.gl/8ogSk)
+;; and [multiple node](http://goo.gl/NIWoK) hadoop cluster tutorials
+;; were immensely helpful.
+
+;; ### Hadoop Defaults
+;;
+;; For this first version of the crate, we chose to lock down a few
+;; parameters that'll be customizable down the road. (We've got a few
+;; ideas on how to provide default overrides in a clean way, using
+;; environments. Stay tuned!) In particular, we lock down version,
+;; Hadoop's final location, and the name of the hadoop user and group
+;; to be installed on each machine in the cluster.
+
+(defn versioned-home
+  "Default Hadoop location, based on version number."
+  [version]
+  (format "/usr/local/hadoop-%s" version))
+
+(def default-version "0.20.2")
+(def hadoop-home (versioned-home default-version))
+(def hadoop-user "hadoop")
+(def hadoop-group "hadoop")
+
+;; ### User Creation
 ;;
 ;; For the various nodes of a hadoop cluster to communicate with one
-;; another, it becomes necessary to create a common user account on
-;; every machine. For this iteration of the crate, we chose the
-;; user/group pair of `hadoop/hadoop`, as defined by `hadoop-user` and
-;; `hadoop-group`.
+;; another, they need to share a common user with common
+;; permissions. Something to keep in mind when manually logging in to
+;; nodes -- hadoop java processes will run as the `hadoop` user, so
+;; calls to `jps` as anyone else will show nothing running. If you'd
+;;like to run a test job, ssh into the machine and run
+;;
+;;    `sudo su - hadoop`
+;;
+;; before interacting with hadoop.
 
 (def-phase-fn create-hadoop-user
   "Create a hadoop user on a cluster node. We add the hadoop binary
@@ -360,11 +370,11 @@
                                      :PATH (format "$PATH:%s/bin" hadoop-home))))
 
 
-;; Once the hadoop user is created, we need to create an ssh key for
-;; that user and share it around the cluster. The Jobtracker in
-;; particular needs the ability to ssh without a password into every
-;; cluster node running a task tracker. We assume in the following
-;; functions that this could be any node other than the jobtracker.
+;; Once the hadoop user is created, we create an ssh key for that user
+;; and share it around the cluster. The jobtracker needs passwordless
+;; ssh access into every cluster node running a task tracker, so that
+;; it can distribute the data processing code that these machines need
+;; to do anything useful.
 
 (defn- get-node-ids-for-group
   "Get the id of the nodes in a group node"
@@ -380,7 +390,6 @@
                                 :user (keyword user)
                                 :id_rsa])))
 
-;; TODO -- convert into phase -- define private phase?
 (defn- authorize-key
   [request local-user group remote-user]
   (let [keys (get-keys-for-group request group remote-user)]
@@ -397,7 +406,9 @@
 
 ;; In the current iteration, `publish-ssh-key` phase should only be
 ;; called on the job-tracker, and will only work with a subsequent
-;; `authorize-jobtracker` phase on the same request.
+;; `authorize-jobtracker` phase on the same request. Pallet is
+;; stateless between transactions, and the ssh key needs some way to
+;; get between nodes. Currently, we store the new ssh key in the request.
 
 (def-phase-fn publish-ssh-key
   []
@@ -416,6 +427,9 @@
 
 ;; ### Installation
 ;;
+;; `url` points to Apache's default installation of Hadoop. Future
+;; iterations of this crate will support the Cloudera build.
+
 (defn url
   "Download URL for the Apache distribution of Hadoop, generated for
   the supplied version."
@@ -425,7 +439,9 @@
    version version))
 
 (def-phase-fn install
-  "Initial hadoop installation."
+  "First phase to be called when configuring a hadoop cluster. This
+  phase creates a common hadoop user, and downloads and unpacks the
+  default Apache hadoop distribution."
   []
   (let [url (url default-version)]
     create-hadoop-user
@@ -437,13 +453,13 @@
                                        :owner hadoop-user
                                        :group hadoop-user)))
 
-;; ## Configuration
+;; ### Configuration
 ;;
-;;
-;;
-;; TODO -- talk about how we're providing facilities for printing the
-;;configuration files out as XML. Talk a bit about how complicated
-;;configuration can be, in the hadoop environment.
+;; Hadoop has three main configuration files, each of which are a
+;; series of key-value pairs, stored as XML files. Before cluster
+;; configuration, we need some way to pretty-print human readable XML
+;; representing the configuration properties that we'll store in a
+;; clojure map.
 
 (defn ppxml
   "Accepts an XML string with no newline formatting and returns the
@@ -489,10 +505,21 @@
         #(property->xml % (final-properties (key %)))
         properties)]))))
 
-;; As far as the next few functions are concerned, I believe Tom
-;; White, in the wonderful [Hadoop: The Definitive
-;; Guide](http://goo.gl/nPWWk), put it best: "Hadoop has a bewildering
-;; number of configuration properties".
+
+;; ### Sane Defaults
+;;
+;; As mentioned before, Hadoop configuration can be a bit
+;; bewildering. Default values and descriptions of the meaning of each
+;; setting can be found here:
+;;
+;; http://hadoop.apache.org/core/docs/r0.20.0/mapred-default.html
+;; http://hadoop.apache.org/core/docs/r0.20.0/hdfs-default.html
+;; http://hadoop.apache.org/core/docs/r0.20.0/core-default.html
+;;
+;; We override a number of these below based on suggestions found in
+;; various posts. We'll supply more information on the justification
+;; for each of these as we move forward with our dynamic "sane
+;; defaults" system.
 
 (defn default-properties
   "Returns a nested map of Hadoop default configuration properties,
@@ -516,7 +543,7 @@
                    :mapred.map.tasks.speculative.execution true
                    :mapred.reduce.tasks.speculative.execution false
                    :mapred.reduce.parallel.copies 10
-                   :mapred.reduce.tasks 10
+                   :mapred.reduce.tasks 5
                    :mapred.submit.replication 10
                    :mapred.tasktracker.map.tasks.maximum 2
                    :mapred.tasktracker.reduce.tasks.maximum 1
@@ -534,7 +561,11 @@
                                          "org.apache.hadoop.io.compress.DefaultCodec,"
                                          "org.apache.hadoop.io.compress.GzipCodec")}}))
 
-;; TODO -- discuss final properties, here.
+;; Final properties are properties that can't be overridden during the
+;; execution of a job. We're not sure that these are the right
+;; properties to lock, as of now -- this will become more clear as we
+;; move forward with sane defaults. In the meantime, any suggestions
+;; would be much appreciated.
 
 (def final-properties
   #{:dfs.block.size
@@ -572,17 +603,18 @@ directory."
      :owner hadoop-user :group hadoop-group)))
 
 (defn merge-config
-  "Merges two hadoop configuration option maps together, with the
-  entries in new-props taking precedence."
+  "Merges a set of custom hadoop configuration option maps into the
+  current defaults. If a conflict exists, entries in `new-props` knock
+  out entries in `old-props`."
   [default-props new-props]
   (apply merge
          (for [[name props] default-props]
            {name (merge props (name new-props))})))
 
-;; TODO -- we need the ability to add custom properties, here!
 (def-phase-fn env-file
   "Phase that creates the `hadoop-env.sh` file with references to the
-  supplied pid and log dirs. To `hadoop-env.sh` will be placed within the supplied config directory."
+  supplied pid and log dirs. `hadoop-env.sh` will be placed within the
+  supplied config directory."
   [config-dir log-dir pid-dir]
   (remote-file/remote-file
    (str config-dir "/hadoop-env.sh")
@@ -591,6 +623,24 @@ directory."
              :HADOOP_LOG_DIR log-dir
              :HADOOP_SSH_OPTS "\"-o StrictHostKeyChecking=no\""
              :HADOOP_OPTS "\"-Djava.net.preferIPv4Stack=true\"")))
+
+;; We do our development on local machines using `vmfest`, which
+;; brought us in context with the next problem. Some clouds --
+;; Amazon's EC2, for example -- require nodes to be configured with
+;; private IP addresses. Hadoop is designed for use within private
+;; clusters, so this is typically the right choice. Sometimes,
+;; however, public IP addresses are preferable, as in a virtual
+;; machine setup.
+;;
+;; Hadoop takes the IP addresses in `fs.default.name`,
+;; `mapred.job.tracker` and performs a reverse DNS lookup, tracking
+;; each machine by its hostname. If your cluster isn't set up to
+;; handle DNS lookup, you might run into some interesting issues. On
+;; these VMs, for example, reverse DNS lookups by the virtual machines
+;; on each other caused every VM to resolve to the hostname of my home
+;; router. This can cause jobs to limp along or fail msyteriously. We
+;; have a workaround involved the `/etc/hosts` file planned for a
+;; future iteration.
 
 (defn get-master-ip
   "Returns the IP address of a particular type of master node,
@@ -607,11 +657,6 @@ directory."
       ((case ip-type
              :private compute/private-ip
              :public compute/primary-ip) master))))
-
-;; TODO -- Are we setting references to pid-dir and log-dir in the
-;; configuration files? If so, we're going to need to override those
-;; defaults with the pid-dir and log-dir described below, and pull
-;; them out of the properties map, like we do with tmp-dir.
 
 (def-phase-fn configure
   "Configures a Hadoop cluster by creating all required default
@@ -645,12 +690,23 @@ directory."
      (config-files conf-dir properties)
      (env-file conf-dir log-dir pid-dir))))
 
+;; The following script allows for proper transmission of SSH
+;; commands, with hadoop's required `JAVA_HOME` property all set.
+
 (script/defscript as-user [user & command])
 (stevedore/defimpl as-user :default [user & command]
   (su -s "/bin/bash" ~user
       -c "\"" (str "export JAVA_HOME=" (java-home) ";") ~@command "\""))
 (stevedore/defimpl as-user [#{:yum}] [user & command]
   ("/sbin/runuser" -s "/bin/bash" - ~user -c ~@command))
+
+;; Hadoop services, or `roles`, are all run by the `hadoop-daemon.sh`
+;; command. Other scripts exist, such as `hadoop-daemons.sh` (for
+;; running commands on many nodes at once), but pallet takes over for
+;; a good number of these. The following `phase-fn` takes care to only
+;; start a hadoop service that's not already running for the `hadoop`
+;; user. Future iterations may provide the ability to force some
+;; daemon service to restart.
 
 (def-phase-fn hadoop-service
   "Run a Hadoop service"
@@ -667,8 +723,8 @@ directory."
          ~hadoop-daemon))))))
 
 (def-phase-fn hadoop-command
-  "Runs '$ hadoop ...' on each machine in the request. Command runs
-  has the hadoop user."
+  "Runs '$ hadoop `args`' on each machine in the request. Command runs
+  as the hadoop user."
   [& args]
   (exec-script/exec-checked-script
    (apply str "hadoop " (interpose " " args))
@@ -676,6 +732,15 @@ directory."
     ~hadoop-user
     (str ~hadoop-home "/bin/hadoop")
     ~@args)))
+
+;; `format-hdfs` is, effectively, a call to
+;;
+;;    `(hadoop-command "namenode" "-format")
+;;
+;; that call would only work the first time, however. On subsequent
+;;format requests, hadoop tells the user that the namenode has already
+;;been formatted, and asks for confirmation. The current version of
+;;`format-namenode` sends a default "N" every time.
 
 (def-phase-fn format-hdfs
   "Formats HDFS for the first time. If HDFS has already been
@@ -689,8 +754,9 @@ directory."
               "namenode"
               "-format")))))
 
-;; TODO -- think about the dfsadmin call, etc, that's happening
-;; here. is that needed? Do we need to run this mkdir?
+;; And, here we are at the end! The following five functions activate
+;; each of the five distinct roles that hadoop nodes may take on.
+
 (def-phase-fn name-node
   "Collection of all subphases required for a namenode."
   [data-dir]
