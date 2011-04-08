@@ -1,5 +1,3 @@
-;; -*- Mode: Clojure; indent-tabs-mode: nil -*-
-;;
 ;; Licensed to the Apache Software Foundation (ASF) under one or more
 ;; contributor license agreements.  See the NOTICE file distributed
 ;; with this work for additional information regarding copyright
@@ -16,9 +14,11 @@
 (ns pallet.crate.hadoop
   "Pallet crate to manage Hadoop installation and configuration.
 INCOMPLETE - not yet ready for general use, but close!"
-  (:use [pallet.thread-expr :only (apply->)]
-        [clojure.contrib.def :only (name-with-attributes)])
-  (:require [pallet.parameter :as parameter]
+  (:use [clojure.contrib.def :only (name-with-attributes)]
+        [pallet.thread-expr :only (apply->)])
+  (:require [clojure.contrib.condition :as condition]
+            [clojure.contrib.macro-utils :as macro]
+            [pallet.parameter :as parameter]
             [pallet.stevedore :as stevedore]
             [pallet.compute :as compute]
             [pallet.request-map :as request-map]
@@ -32,50 +32,18 @@ INCOMPLETE - not yet ready for general use, but close!"
             [clojure.contrib.prxml :as prxml]
             [clojure.string :as string]
             [clojure.contrib.logging :as log]
-            [clojure.contrib.condition :as condition]
-            [clojure.contrib.macro-utils :as macro]
             [pallet.crate.ssh-key :as ssh-key]
             [pallet.crate.java :as java])
   (:import [java.io StringReader StringWriter]
            [javax.xml.transform TransformerFactory OutputKeys]
            [javax.xml.transform.stream StreamSource StreamResult]))
 
-;; This crate contains all information required to set up and
-;; configure a fully functional installation of Apache's
-;; Hadoop. Working through this crate, you might find Michael
-;; G. Noll's [single node](http://goo.gl/8ogSk) and [multiple
-;; node](http://goo.gl/NIWoK) hadoop cluster tutorials to be helpful.
-
-;; Other helpful links:
+;; ### Pallet Extensions
 ;;
-;; http://www.michael-noll.com/tutorials/running-hadoop-on-ubuntu-linux-multi-node-cluster/
-;; http://wiki.apache.org/hadoop/GettingStartedWithHadoop
-;; http://www.michael-noll.com/tutorials/running-hadoop-on-ubuntu-linux-single-node-cluster
-;; http://hadoop.apache.org/mapreduce/docs/current/mapred-default.html
-;; http://hadoop.apache.org/hdfs/docs/current/hdfs-default.html
-;; http://hadoop.apache.org/common/docs/current/cluster_setup.html#core-site.xml
-;; http://hadoop.apache.org/#What+Is+Hadoop%3F
-
-;; ### Hadoop Defaults
-;;
-;; Here's a method for creating default directory names based on
-;;version, if you're so inclined.
-
-(defn versioned-home
-  "Default Hadoop location, based on version number."
-  [version]
-  (format "/usr/local/hadoop-%s" version))
-
-;; Sane defaults, until we implement defaults using the environment
-;; system.
-
-(def default-version "0.20.2")
-(def hadoop-home (versioned-home default-version))
-(def hadoop-user "hadoop")
-(def hadoop-group "hadoop")
-
-;; ### Pallet Utils
-;; TODO -- we can remove these, if Hugo adds them to pallet.
+;; We start with a few extensions to pallet's crate writing
+;; facilities. These may or may not make it into pallet proper; we use
+;; them here for demonstration, and as an example of the flexibility
+;;that a `phase-fn` with arguments might afford.
 
 ;; #### Threading Macros
 
@@ -129,10 +97,23 @@ INCOMPLETE - not yet ready for general use, but close!"
          ~@binding]
      (-> ~sym ~@body)))
 
-;; TODO -- add apply, if... what else?
+;; Here's the macro we've been waiting for. Pallet makes heavy use of
+;; threading to build up its requests; each phase accepts an argument
+;; vector, binds locals, and either directly modify the request, or
+;; threads it through more primitive subphases. `-->` layers various
+;; flow control constructs onto `->`, allowing for more natural
+;; expressions within the body of the thread. For example:
+;;
+;;    (--> 10
+;;         (for [x (range 10)]
+;;            (+ x)))
+;;    ;=> 55
+
 (defmacro -->
   "Similar to `clojure.core/->`, but includes symbol macros  for `when`,
-  `let` and `for` commands on the internal threading expressions."
+  `let` and `for` commands on the internal threading
+  expressions. Future iterations will include more symbol macro
+  bindings."
   [& forms]
   `(macro/symbol-macrolet
     [~'when pallet.thread-expr/when->
@@ -142,6 +123,19 @@ INCOMPLETE - not yet ready for general use, but close!"
     (-> ~@forms)))
 
 ;; #### Phase Macros
+;;
+;; The `-->` macro above opens the door for a more abstract way to
+;; write phases. By capturing the pattern of a function that threads
+;; its first argument through the rest of its forms, we can simplify
+;; phase function definitions, while making their signatures clearer
+;; to the user. (`(def-phase-fn some-phase ...)` presents a simpler
+;; signal than `(defn some-phase [arg ...] (-> arg ...))`; the first
+;; is a crate function, the second may not be.)
+;;
+;; Additionally, by controlling the way in which request threading
+;; occurs, we gain the ability to insert checks between every form in
+;; passed in to the phase function. `check-session` is a simple test
+;;that makes sure that the session exists, and is a map.
 
 (defn check-session
   "Function that can check a session map to ensure it is a valid part of
@@ -169,11 +163,20 @@ INCOMPLETE - not yet ready for general use, but close!"
       macro, -> or pallet.phase/phase-fn, to simplify chaining of the
       session map argument."))))
 
+;; Next, we have `defthreadfn`, a macro-writing macro that generates
+;; phase functions with various combinations of watchdog
+;; functions. The classic `phase-fn` only uses `check-session` above;
+;; `defthreadfn` makes it trivial to add other request tests to
+;; `phase-fn`, or to provide other types of phase functions, even
+;; crate specific. All of these are composable, as the checking
+;; functions only check requests passed out of the immediate subphases
+;; of some type of phase function.
+;;
+;;
 ;; To qualify as a checker, a function must take two arguments -- the
 ;; threaded argument, and a description of the form from which it's
 ;; just returned.
 
-;; TODO -- have this thing do arglists properly.
 (defmacro defthreadfn
   "Binds a var to a particular class of anonymous functions that
   accept a vector of arguments and a number of subexpressions. When
@@ -237,12 +240,6 @@ INCOMPLETE - not yet ready for general use, but close!"
    each phase invocation."
   check-session)
 
-(defmacro phase
-  "Equivalent to `phase-fn` with an empty argument vector. Placed for
-  purposes of comfort."
-  [& phases]
-  `(phase-fn [] ~@phases))
-
 (defthreadfn unchecked-phase-fn
   "Unchecked version of `phase-fn`.
 
@@ -257,7 +254,6 @@ INCOMPLETE - not yet ready for general use, but close!"
            (+ x)
            (+ y)))")
 
-;; TODO -- Support for various arg lists?
 (defmacro def-phase-fn
   "Binds a `phase-fn` to the supplied name."
   [name & rest]
@@ -265,6 +261,67 @@ INCOMPLETE - not yet ready for general use, but close!"
         (name-with-attributes name rest)]
     `(def ~name
        (phase-fn ~argvec ~@body))))
+
+;; `phase` is deprecated by pallet 0.5.0 in favor of `phase-fn` with
+;; no argument vector... I do have to say, though, in a world where
+;; `phase-fn` DOES have an argument vector, it becomes nice at the top
+;; level to be able to compose various phases without that empty
+;; argument vector, like so:
+;;
+;;    (phase
+;;      (java/java :jdk)
+;;      hadoop/install)
+;;
+;; rather than
+;;
+;;    (phase-fn []
+;;      (java/java :jdk)
+;;      hadoop/install)
+;;
+;; So, to see how it looks, and for backwards compatibility, we
+;; provide `phase`.
+
+(defmacro phase
+  "Equivalent to `phase-fn` with an empty argument vector. Placed for
+  comfort!"
+  [& phases]
+  `(phase-fn [] ~@phases))
+
+;; Great! Now, on to Hadoop.
+
+;; This crate contains all information required to set up and
+;; configure a fully functional installation of Apache's
+;; Hadoop. Working through this crate, you might find Michael
+;; G. Noll's [single node](http://goo.gl/8ogSk) and [multiple
+;; node](http://goo.gl/NIWoK) hadoop cluster tutorials to be helpful.
+
+;; Other helpful links:
+;;
+;; http://www.michael-noll.com/tutorials/running-hadoop-on-ubuntu-linux-multi-node-cluster/
+;; http://wiki.apache.org/hadoop/GettingStartedWithHadoop
+;; http://www.michael-noll.com/tutorials/running-hadoop-on-ubuntu-linux-single-node-cluster
+;; http://hadoop.apache.org/mapreduce/docs/current/mapred-default.html
+;; http://hadoop.apache.org/hdfs/docs/current/hdfs-default.html
+;; http://hadoop.apache.org/common/docs/current/cluster_setup.html#core-site.xml
+;; http://hadoop.apache.org/#What+Is+Hadoop%3F
+
+;; ### Hadoop Defaults
+;;
+;; Here's a method for creating default directory names based on
+;;version, if you're so inclined.
+
+(defn versioned-home
+  "Default Hadoop location, based on version number."
+  [version]
+  (format "/usr/local/hadoop-%s" version))
+
+;; Sane defaults, until we implement defaults using the environment
+;; system.
+
+(def default-version "0.20.2")
+(def hadoop-home (versioned-home default-version))
+(def hadoop-user "hadoop")
+(def hadoop-group "hadoop")
 
 ;; ### Hadoop Utils
 
@@ -321,15 +378,6 @@ INCOMPLETE - not yet ready for general use, but close!"
     (parameter/get-for request [:host (keyword node)
                                 :user (keyword user)
                                 :id_rsa])))
-
-;; TODO -- delete?
-#_(defn authorize-group
-  [request user tag users]
-  (let [keys (get-keys-for-group request tag users)]
-    (->
-     request
-     (for-> [key keys]
-            (ssh-key/authorize-key user key)))))
 
 ;; TODO -- convert into phase -- define private phase?
 (defn- authorize-key

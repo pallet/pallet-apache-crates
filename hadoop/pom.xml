@@ -23,5 +23,10 @@
       <artifactId>java</artifactId>
       <version>0.4.0</version>
     </dependency>
+    <dependency>
+      <groupId>org.cloudhoist</groupId>
+      <artifactId>ssh-key</artifactId>
+      <version>0.4.0</version>
+    </dependency>
   </dependencies>
 </project>
