@@ -607,9 +607,7 @@ directory."
   current defaults. If a conflict exists, entries in `new-props` knock
   out entries in `old-props`."
   [default-props new-props]
-  (apply merge
-         (for [[name props] default-props]
-           {name (merge props (name new-props))})))
+  (merge-with merge default-props new-props))
 
 (def-phase-fn env-file
   "Phase that creates the `hadoop-env.sh` file with references to the
