@@ -162,63 +162,7 @@
       macro, -> or pallet.phase/phase-fn, to simplify chaining of the
       session map argument."))))
 
-;; Next, we have `defthreadfn`, a macro-writing macro that generates
-;; phase functions with various combinations of watchdog
-;; functions. The classic `phase-fn` only uses `check-session` above;
-;; `defthreadfn` makes it trivial to add other request tests to
-;; `phase-fn`, or to provide other types of phase functions, even
-;; crate specific. All of these are composable, as the checking
-;; functions only check requests passed out of the immediate subphases
-;; of some type of phase function.
-;;
-;;
-;; To qualify as a checker, a function must take two arguments -- the
-;; threaded argument, and a description of the form from which it's
-;; just returned.
-
-(defmacro defthreadfn
-  "Binds a var to a particular class of anonymous functions that
-  accept a vector of arguments and a number of subexpressions. When
-  calling the produced functions, the caller must supply a threading
-  parameter as the first argument. This parameter will be threaded
-  through the resulting forms; the extra parameters made available in
-  the argument vector will be available to all subexpressions.
-
-  In addition to the argument vector, `defthreadfn` accepts any number
-  of watchdog functions, each of which are inserted into the thread
-  after each subexpression invocation. These watchdog functions are
-  required to accept 2 arguments -- the threaded argument, and a
-  string representation of the previous subexpression. For example,
-
-    (defthreadfn mapped-thread-fn
-      (fn [arg sub-expr]
-        (if (map? arg)
-          arg
-          (condition/raise
-           :type :invalid-session
-           :message
-           (format \"Only maps are allowed, and %s is most definitely
-                   not a map.\" sub-expr)))))
-
-  Returns a `thread-fn` that makes sure the threaded argument remains
-  a map, on every step of its journey.
-
-  For a more specific example if `defthreadfn`, see
-  `pallet.phase/phase-fn`."
-  [macro-name & rest]
-  (let [[macro-name checkers] (name-with-attributes macro-name rest)]
-    `(defmacro ~macro-name
-       ([argvec#] (~macro-name argvec# identity))
-       ([argvec# subphase# & left#]
-          `(fn [~'session# ~@argvec#]
-             (--> ~'session#
-                 ~subphase#
-                 ~@(for [func# ~(vec checkers)]
-                     (list func# (str subphase#)))
-                 ~@(when left#
-                     [`((~'~macro-name ~argvec# ~@left#) ~@argvec#)])))))))
-
-(defthreadfn phase-fn
+(defmacro phase-fn
   "Composes a phase function from a sequence of phases by threading an
  implicit phase session parameter through each. Each phase will have
  access to the parameters passed in through `phase-fn`'s argument
@@ -237,21 +181,14 @@
   
    with a number of verifications on the session map performed after
    each phase invocation."
-  check-session)
-
-(defthreadfn unchecked-phase-fn
-  "Unchecked version of `phase-fn`.
-
-   The following two forms are equivalent:
-
-   (unchecked-phase-fn [x y]
-       (+ x)
-       (+ y))
-
-   (fn [session x y]
-       (-> session
-           (+ x)
-           (+ y)))")
+  ([argvec] (phase-fn argvec identity))
+  ([argvec subphase & left]
+     `(fn [session# ~@argvec]
+        (--> session#
+             ~subphase
+             (check-session ~(str subphase))
+             ~@(when left
+                 [`((phase-fn ~argvec ~@left) ~@argvec)])))))
 
 (defmacro def-phase-fn
   "Binds a `phase-fn` to the supplied name."
