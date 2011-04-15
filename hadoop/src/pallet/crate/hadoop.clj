@@ -217,11 +217,8 @@
 ;; So, to see how it looks, and for backwards compatibility, we
 ;; provide `phase`.
 
-(defn phase [first & more]
-  (let [next (if more
-               (phase more)
-               identity)])
-  (phase-fn [] first next))
+(defmacro phase [& forms]
+  `(phase-fn [] ~@forms))
 
 ;; #### General Utilities
 ;;
