@@ -280,11 +280,11 @@
 ;; So, to see how it looks, and for backwards compatibility, we
 ;; provide `phase`.
 
-(defmacro phase
-  "Equivalent to `phase-fn` with an empty argument vector. Placed for
-  comfort!"
-  [& phases]
-  `(phase-fn [] ~@phases))
+(defn phase [first & more]
+  (let [next (if more
+               (phase more)
+               identity)])
+  (phase-fn [] first next))
 
 ;; #### General Utilities
 ;;
@@ -298,7 +298,7 @@
      (format "export %s=%s\n" (name k) v))))
 
 ;; Great! Now, on to Hadoop.
-
+;;
 ;; ## Hadoop Configuration
 ;;
 ;; This crate contains all information required to set up and
@@ -427,27 +427,33 @@
 
 ;; ### Installation
 ;;
-;; `url` points to Apache's default installation of Hadoop. Future
-;; iterations of this crate will support the Cloudera build.
+;; `url` points to Cloudera's installation of Hadoop. Future
+;; iterations of this crate will support the default apache build.
+;;
+;; TODO -- support switching between cloudera and regular. Regular, we
+;; should give a version -- cloudera, it doesn't really mean much.
 
 (defn url
-  "Download URL for the Apache distribution of Hadoop, generated for
+  "Download URL for the Cloudera CDH3 distribution of Hadoop, generated for
   the supplied version."
   [version]
-  (format
-   "http://www.apache.org/dist/hadoop/core/hadoop-%s/hadoop-%s.tar.gz"
-   version version))
+  (case version
+        :cloudera (format
+                   "http://archive.cloudera.com/cdh/3/hadoop-%s-cdh3u0.tar.gz" default-version)
+        :apache (format
+                 "http://www.apache.org/dist/hadoop/core/hadoop-%s/hadoop-%s.tar.gz"
+                 default-version default-version)))
+
 
 (def-phase-fn install
   "First phase to be called when configuring a hadoop cluster. This
   phase creates a common hadoop user, and downloads and unpacks the
-  default Apache hadoop distribution."
-  []
-  (let [url (url default-version)]
+  default Cloudera hadoop distribution."
+  [build]
+  (let [url (url build)]
     create-hadoop-user
     (remote-directory/remote-directory hadoop-home
                                        :url url
-                                       :md5-url (str url ".md5")
                                        :unpack :tar
                                        :tar-options "xz"
                                        :owner hadoop-user
@@ -524,7 +530,7 @@
 (defn default-properties
   "Returns a nested map of Hadoop default configuration properties,
   named according to the 0.20 api."
-  [name-node-ip job-tracker-ip]
+  [name-node-ip job-tracker-ip pid-dir log-dir]
   (let [owner-dir (stevedore/script (user/user-home ~hadoop-user))
         owner-subdir (partial str owner-dir)]
     {:hdfs-site {:dfs.data.dir (owner-subdir "/dfs/data")
@@ -532,7 +538,8 @@
                  :dfs.datanode.du.reserved 1073741824
                  :dfs.namenode.handler.count 10
                  :dfs.permissions.enabled true
-                 :dfs.replication 3}
+                 :dfs.replication 3
+                 :dfs.datanode.max.xcievers 4096}
      :mapred-site {:tasktracker.http.threads 46
                    :mapred.local.dir (owner-subdir "/mapred/local")
                    :mapred.system.dir "/hadoop/mapred/system"
@@ -559,7 +566,11 @@
                  :hadoop.rpc.socket.factory.class.JobSubmissionProtocol ""
                  :io.compression.codecs (str
                                          "org.apache.hadoop.io.compress.DefaultCodec,"
-                                         "org.apache.hadoop.io.compress.GzipCodec")}}))
+                                         "org.apache.hadoop.io.compress.GzipCodec")}
+     :hadoop-env {:HADOOP_PID_DIR pid-dir
+                  :HADOOP_LOG_DIR log-dir
+                  :HADOOP_SSH_OPTS "\"-o StrictHostKeyChecking=no\""
+                  :HADOOP_OPTS "\"-Djava.net.preferIPv4Stack=true\""}}))
 
 ;; Final properties are properties that can't be overridden during the
 ;; execution of a job. We're not sure that these are the right
@@ -602,25 +613,31 @@ directory."
      :content (properties->xml props)
      :owner hadoop-user :group hadoop-group)))
 
-(defn merge-config
+(def merge-config (partial merge-with merge))
+
+(defn merge-and-split-config
   "Merges a set of custom hadoop configuration option maps into the
-  current defaults. If a conflict exists, entries in `new-props` knock
-  out entries in `old-props`."
+  current defaults, and returns a 2-vector where the first item is a
+  map of *-site files, and the second item is a map of exports for
+  `hadoop-env.sh`. If a conflict exists, entries in `new-props` knock
+  out entries in `default-props`."
   [default-props new-props]
-  (merge-with merge default-props new-props))
+  (let [prop-map (merge-config default-props new-props)
+        corekey-seq [:core-site :hdfs-site :mapred-site]
+        envkey-seq [:hadoop-env]]
+    (map #(select-keys prop-map %) [corekey-seq envkey-seq])))
 
 (def-phase-fn env-file
   "Phase that creates the `hadoop-env.sh` file with references to the
   supplied pid and log dirs. `hadoop-env.sh` will be placed within the
   supplied config directory."
-  [config-dir log-dir pid-dir]
-  (remote-file/remote-file
-   (str config-dir "/hadoop-env.sh")
-   :content (format-exports
-             :HADOOP_PID_DIR pid-dir
-             :HADOOP_LOG_DIR log-dir
-             :HADOOP_SSH_OPTS "\"-o StrictHostKeyChecking=no\""
-             :HADOOP_OPTS "\"-Djava.net.preferIPv4Stack=true\"")))
+  [config-dir env-map]
+  (for [[fname exports] env-map
+        :let [fname (name fname)
+              export-seq (flatten (seq exports))]]
+    (remote-file/remote-file
+     (format "%s/%s.sh" config-dir fname)
+     :content (apply format-exports export-seq))))
 
 ;; We do our development on local machines using `vmfest`, which
 ;; brought us in context with the next problem. Some clouds --
@@ -663,7 +680,8 @@ directory."
 
     {:core-site {:key val...}
      :hdfs-site {:key val ...}
-     :mapred-site {:key val ...}}
+     :mapred-site {:key val ...}
+     :hadoop-env {:export val ...}}
 
   No other top-level keys are supported at this time."
   [ip-type namenode-tag jobtracker-tag properties]
@@ -676,8 +694,8 @@ directory."
          jt-ip (get-master-ip request ip-type jobtracker-tag)
          pid-dir (stevedore/script (str (pid-root) "/hadoop"))
          log-dir (stevedore/script (str (log-root) "/hadoop"))
-         defaults  (default-properties nn-ip jt-ip)
-         properties (merge-config defaults properties)
+         defaults  (default-properties nn-ip jt-ip pid-dir log-dir)
+         [props env] (merge-and-split-config defaults properties)
          tmp-dir (get-in properties [:core-site :hadoop.tmp.dir])]
      (for [path  [conf-dir tmp-dir log-dir pid-dir]]
        (directory/directory path
@@ -685,8 +703,8 @@ directory."
                             :group hadoop-group
                             :mode "0755"))
      (file/symbolic-link conf-dir etc-conf-dir)
-     (config-files conf-dir properties)
-     (env-file conf-dir log-dir pid-dir))))
+     (config-files conf-dir props)
+     (env-file conf-dir env))))
 
 ;; The following script allows for proper transmission of SSH
 ;; commands, with hadoop's required `JAVA_HOME` property all set.
