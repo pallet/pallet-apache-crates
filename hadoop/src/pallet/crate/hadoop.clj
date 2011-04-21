@@ -15,7 +15,8 @@
   "Pallet crate to manage Hadoop installation and configuration."
   (:use [clojure.contrib.def :only (name-with-attributes)]
         [pallet.thread-expr :only (apply->)])
-  (:require [clojure.contrib.condition :as condition]
+  (:require pallet.resource.filesystem-layout
+            [clojure.contrib.condition :as condition]
             [clojure.contrib.macro-utils :as macro]
             [pallet.parameter :as parameter]
             [pallet.stevedore :as stevedore]
