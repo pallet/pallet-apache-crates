@@ -47,6 +47,18 @@
 
 ;; #### Threading Macros
 
+(defmacro binding->
+  "A `binding` form that can appear in a request thread.
+   eg.
+      (def *a* 0)
+      (-> 1
+        (binding-> [*a* 1]
+          (+ a)))
+   => 2"
+  [arg bindings & body]
+  `(binding ~bindings
+     (-> ~arg ~@body)))
+
 (defmacro for->
   "Apply a thread expression to a sequence.
    eg.
@@ -119,6 +131,7 @@
     [~'when pallet.thread-expr/when->
      ~'for for->
      ~'let let->
+     ~'binding binding->
      ~'expose-request-as expose-arg->]
     (-> ~@forms)))
 
@@ -542,11 +555,12 @@ property-map] pairs, and augments the supplied request to allow for
 the creation of each referenced configuration file within the base
 directory."
   [config-dir properties]
-  (for [[filename props] properties]
-    (remote-file/remote-file
-     (format "%s/%s.xml" config-dir (name filename))
-     :content (properties->xml props)
-     :owner hadoop-user :group hadoop-group)))
+  (binding [remote-file/force-overwrite true]
+    (for [[filename props] properties]
+      (remote-file/remote-file
+       (format "%s/%s.xml" config-dir (name filename))
+       :content (properties->xml props)
+       :owner hadoop-user :group hadoop-group))))
 
 (def merge-config (partial merge-with merge))
 
