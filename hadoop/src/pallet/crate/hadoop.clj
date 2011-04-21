@@ -13,8 +13,11 @@
 
 (ns pallet.crate.hadoop
   "Pallet crate to manage Hadoop installation and configuration."
-  (:use [pallet.thread-expr :only (apply->)])
-  (:require [pallet.parameter :as parameter]
+  (:use [clojure.contrib.def :only (name-with-attributes)]
+        [pallet.thread-expr :only (apply->)])
+  (:require [clojure.contrib.condition :as condition]
+            [clojure.contrib.macro-utils :as macro]
+            [pallet.parameter :as parameter]
             [pallet.stevedore :as stevedore]
             [pallet.compute :as compute]
             [pallet.request-map :as request-map]
@@ -34,11 +37,14 @@
            [javax.xml.transform TransformerFactory OutputKeys]
            [javax.xml.transform.stream StreamSource StreamResult]))
 
-;; #### General Utilities
+;; ### Pallet Extensions
 ;;
-;; Updated version of `for->`, from `pallet.thread-expr`. This version
-;; has support for destructuring. We'll need to update the pallet
-;; dependency to take advantage of this.
+;; We start with a few extensions to pallet's crate writing
+;; facilities. These may or may not make it into pallet proper; we use
+;; them here for demonstration, and as an example of the flexibility
+;;that a `phase-fn` with arguments might afford.
+
+;; #### Threading Macros
 
 (defmacro for->
   "Apply a thread expression to a sequence.
@@ -53,8 +59,170 @@
            (for ~seq-exprs
              (fn [arg#] (-> arg# ~@body)))))
 
-;; This one is generally quite useful; is there a place for this in
-;; stevedore?
+(defmacro let->
+  "Allows binding of variables in a threading expression, with support
+  for destructuring. For example:
+
+ (-> 5
+    (let-> [x 10]
+           (for-> [y (range 4)
+                   z (range 2)] (+ x y z))))
+ ;=> 101"
+  [arg letvec & body]
+  `(let ~letvec (-> ~arg ~@body)))
+
+(defmacro expose-arg->
+  "A threaded form that exposes the value of the threaded arg. For
+  example:
+
+    (-> 1
+      (expose-arg-> [arg]
+        (+ arg)))
+  ;=> 2"
+  [arg [sym] & body]
+  `(let [~sym ~arg] (-> ~sym ~@body)))
+
+(defmacro let-with-arg->
+  "A `let` form that can appear in a request thread, and assign the
+   value of the threaded arg.
+
+   eg.
+      (-> 1
+        (let-with-arg-> val [a 1]
+          (+ a val)))
+   => 3"
+  [arg sym binding & body]
+  `(let [~sym ~arg
+         ~@binding]
+     (-> ~sym ~@body)))
+
+;; Here's the macro we've been waiting for. Pallet makes heavy use of
+;; threading to build up its requests; each phase accepts an argument
+;; vector, binds locals, and either directly modify the request, or
+;; threads it through more primitive subphases. `-->` layers various
+;; flow control constructs onto `->`, allowing for more natural
+;; expressions within the body of the thread. For example:
+;;
+;;    (--> 10
+;;         (for [x (range 10)]
+;;            (+ x)))
+;;    ;=> 55
+
+(defmacro -->
+  "Similar to `clojure.core/->`, but includes symbol macros  for `when`,
+  `let` and `for` commands on the internal threading
+  expressions. Future iterations will include more symbol macro
+  bindings."
+  [& forms]
+  `(macro/symbol-macrolet
+    [~'when pallet.thread-expr/when->
+     ~'for for->
+     ~'let let->
+     ~'expose-request-as expose-arg->]
+    (-> ~@forms)))
+
+;; #### Phase Macros
+;;
+;; The `-->` macro above opens the door for a more abstract way to
+;; write phases. By capturing the pattern of a function that threads
+;; its first argument through the rest of its forms, we can simplify
+;; phase function definitions, while making their signatures clearer
+;; to the user. (`(def-phase-fn some-phase ...)` presents a simpler
+;; signal than `(defn some-phase [arg ...] (-> arg ...))`; the first
+;; is a crate function, the second may not be.)
+;;
+;; Additionally, by controlling the way in which request threading
+;; occurs, we gain the ability to insert checks between every form in
+;; passed in to the phase function. `check-session` is a simple test
+;;that makes sure that the session exists, and is a map.
+
+(defn check-session
+  "Function that can check a session map to ensure it is a valid part of
+   phase definition. It returns the session map.
+
+   On failure, the function will print the phase through which the
+   session passed prior to crashing. It is like that this phase
+   introduced the fault into the session; to aid in debugging, make
+   sure to use `phase-fn` and `def-phase-fn` to build phases."
+  [session form]
+  (if (and session (map? session))
+    session
+    (condition/raise
+     :type :invalid-session
+     :message
+     (str
+      "Invalid session map in phase.\n"
+      (format "session is %s\n" session)
+      (format "Problem probably caused by subphase:\n  %s\n" form)
+      "Check for non crate functions, improper crate functions, or
+      problems in threading the session map in your phase
+      definition. A crate function is a function that takes a session
+      map and other arguments, and returns a modified session
+      map. Calls to crate functions are often wrapped in a threading
+      macro, -> or pallet.phase/phase-fn, to simplify chaining of the
+      session map argument."))))
+
+(defmacro phase-fn
+  "Composes a phase function from a sequence of phases by threading an
+ implicit phase session parameter through each. Each phase will have
+ access to the parameters passed in through `phase-fn`'s argument
+ vector. thus,
+
+    (phase-fn [filename]
+         (file filename)
+         (file \"/other-file\"))
+
+   is equivalent to:
+
+   (fn [session filename]
+     (-> session
+         (file filename)
+         (file \"/other-file\")))
+  
+   with a number of verifications on the session map performed after
+   each phase invocation."
+  ([argvec] (phase-fn argvec identity))
+  ([argvec subphase & left]
+     `(fn [session# ~@argvec]
+        (--> session#
+             ~subphase
+             (check-session ~(str subphase))
+             ~@(when left
+                 [`((phase-fn ~argvec ~@left) ~@argvec)])))))
+
+(defmacro def-phase-fn
+  "Binds a `phase-fn` to the supplied name."
+  [name & rest]
+  (let [[name [argvec & body]]
+        (name-with-attributes name rest)]
+    `(def ~name
+       (phase-fn ~argvec ~@body))))
+
+;; `phase` is deprecated by pallet 0.5.0 in favor of `phase-fn` with
+;; no argument vector... I do have to say, though, in a world where
+;; `phase-fn` DOES have an argument vector, it becomes nice at the top
+;; level to be able to compose various phases without that empty
+;; argument vector, like so:
+;;
+;;    (phase
+;;      (java/java :jdk)
+;;      hadoop/install)
+;;
+;; rather than
+;;
+;;    (phase-fn []
+;;      (java/java :jdk)
+;;      hadoop/install)
+;;
+;; So, to see how it looks, and for backwards compatibility, we
+;; provide `phase`.
+
+(defmacro phase [& forms]
+  `(phase-fn [] ~@forms))
+
+;; #### General Utilities
+;;
+;; This one is generally quite useful, and may end up in stevedore.
 
 (defn format-exports
   "Formats `export` lines for inclusion in a shell script."
@@ -63,6 +231,8 @@
    (for [[k v] (partition 2 kv-pairs)]
      (format "export %s=%s\n" (name k) v))))
 
+;; Great! Now, on to Hadoop.
+;;
 ;; ## Hadoop Configuration
 ;;
 ;; This crate contains all information required to set up and
@@ -115,24 +285,23 @@
 ;;
 ;; before interacting with hadoop.
 
-(defn create-hadoop-user
+(def-phase-fn create-hadoop-user
   "Create a hadoop user on a cluster node. We add the hadoop binary
   directory and a `JAVA_HOME` setting to `$PATH` to facilitate
   development when manually logged in to some particular node."
-  [request]
-  (-> request 
-      (user/group hadoop-group :system true)
-      (user/user hadoop-user
-                 :system true
-                 :create-home true
-                 :shell :bash)
-      (remote-file/remote-file (format "/home/%s/.bash_profile" hadoop-user)
-                               :owner hadoop-user
-                               :group hadoop-group
-                               :literal true
-                               :content (format-exports
-                                         :JAVA_HOME (stevedore/script (java/java-home))
-                                         :PATH (format "$PATH:%s/bin" hadoop-home)))))
+  []
+  (user/group hadoop-group :system true)
+  (user/user hadoop-user
+             :system true
+             :create-home true
+             :shell :bash)
+  (remote-file/remote-file (format "/home/%s/.bash_profile" hadoop-user)
+                           :owner hadoop-user
+                           :group hadoop-group
+                           :literal true
+                           :content (format-exports
+                                     :JAVA_HOME (stevedore/script (java/java-home))
+                                     :PATH (format "$PATH:%s/bin" hadoop-home))))
 
 
 ;; Once the hadoop user is created, we create an ssh key for that user
@@ -161,14 +330,13 @@
     (for-> request [key keys]
            (ssh-key/authorize-key local-user key))))
 
-(defn authorize-groups
+(def-phase-fn authorize-groups
   "Authorizes the master node to ssh into this node."
-  [request local-users tag-remote-users-map]
-  (-> request
-      (for-> [local-user local-users
-              [group remote-users] tag-remote-users-map
-              remote-user remote-users]
-             (authorize-key local-user group remote-user))))
+  [local-users tag-remote-users-map]
+  (for [local-user local-users
+        [group remote-users] tag-remote-users-map
+        remote-user remote-users]
+    (authorize-key local-user group remote-user)))
 
 ;; In the current iteration, `publish-ssh-key` phase should only be
 ;; called on the job-tracker, and will only work with a subsequent
@@ -176,51 +344,54 @@
 ;; stateless between transactions, and the ssh key needs some way to
 ;; get between nodes. Currently, we store the new ssh key in the request.
 
-(defn publish-ssh-key
-  [request]
-  (let [id (request-map/target-id request)
-        tag (request-map/tag request)
-        key-name (format "%s_%s_key" tag id)]
-    (-> request
-        (ssh-key/generate-key hadoop-user :comment key-name)
-        (ssh-key/record-public-key hadoop-user))))
+(def-phase-fn publish-ssh-key
+  []
+  (expose-request-as [request]
+   (let [id (request-map/target-id request)
+         tag (request-map/tag request)
+         key-name (format "%s_%s_key" tag id)]
+     (ssh-key/generate-key hadoop-user :comment key-name)
+     (ssh-key/record-public-key hadoop-user))))
 
-(defn authorize-jobtracker
+(def-phase-fn authorize-jobtracker
   "configures all nodes to accept passwordless ssh requests from the
   jobtracker."
-  [request]
-  (authorize-groups request [hadoop-user] {"jobtracker" [hadoop-user]}))
+  []
+  (authorize-groups [hadoop-user] {"jobtracker" [hadoop-user]}))
 
 ;; ### Installation
+;;
+;; `url` points to Cloudera's installation of Hadoop. Future
+;; iterations of this crate will support the default apache build.
+;;
+;; TODO -- support switching between cloudera and regular. Regular, we
+;; should give a version -- cloudera, it doesn't really mean much.
 
 (defn url
-  "Hadoop download URL, generated for the supplied
-  distribution. Currently supported options are `:cloudera` (CDH3) and
-  `:apache` (0.20.2)."
-  ([] (url :cloudera))
-  ([distro]
-     (case distro
-           :cloudera (format
-                      "http://archive.cloudera.com/cdh/3/hadoop-%s-cdh3u0.tar.gz" default-version)
-           :apache (format
-                    "http://www.apache.org/dist/hadoop/core/hadoop-%s/hadoop-%s.tar.gz"
-                    default-version default-version))))
+  "Download URL for the Cloudera CDH3 distribution of Hadoop, generated for
+  the supplied version."
+  [version]
+  (case version
+        :cloudera (format
+                   "http://archive.cloudera.com/cdh/3/hadoop-%s-cdh3u0.tar.gz" default-version)
+        :apache (format
+                 "http://www.apache.org/dist/hadoop/core/hadoop-%s/hadoop-%s.tar.gz"
+                 default-version default-version)))
 
 
-(defn install
+(def-phase-fn install
   "First phase to be called when configuring a hadoop cluster. This
   phase creates a common hadoop user, and downloads and unpacks the
   default Cloudera hadoop distribution."
-  [request build]
+  [build]
   (let [url (url build)]
-    (-> request
-        create-hadoop-user
-        (remote-directory/remote-directory hadoop-home
-                                           :url url
-                                           :unpack :tar
-                                           :tar-options "xz"
-                                           :owner hadoop-user
-                                           :group hadoop-user))))
+    create-hadoop-user
+    (remote-directory/remote-directory hadoop-home
+                                       :url url
+                                       :unpack :tar
+                                       :tar-options "xz"
+                                       :owner hadoop-user
+                                       :group hadoop-user)))
 
 ;; ### Configuration
 ;;
@@ -364,18 +535,17 @@
     :hadoop.rpc.socket.factory.class.ClientProtocol
     :hadoop.rpc.socket.factory.class.JobSubmissionProtocol})
 
-(defn config-files
+(def-phase-fn config-files
   "Accepts a base directory and a map of [config-filename,
 property-map] pairs, and augments the supplied request to allow for
 the creation of each referenced configuration file within the base
 directory."
-  [request config-dir properties]
-  (-> request
-      (for-> [[filename props] properties]
-             (remote-file/remote-file
-              (format "%s/%s.xml" config-dir (name filename))
-              :content (properties->xml props)
-              :owner hadoop-user :group hadoop-group))))
+  [config-dir properties]
+  (for [[filename props] properties]
+    (remote-file/remote-file
+     (format "%s/%s.xml" config-dir (name filename))
+     :content (properties->xml props)
+     :owner hadoop-user :group hadoop-group)))
 
 (def merge-config (partial merge-with merge))
 
@@ -391,18 +561,17 @@ directory."
         envkey-seq [:hadoop-env]]
     (map #(select-keys prop-map %) [corekey-seq envkey-seq])))
 
-(defn env-file
+(def-phase-fn env-file
   "Phase that creates the `hadoop-env.sh` file with references to the
   supplied pid and log dirs. `hadoop-env.sh` will be placed within the
   supplied config directory."
-  [request config-dir env-map]
-  (-> request
-      (for-> [[fname exports] env-map
-              :let [fname (name fname)
-                    export-seq (flatten (seq exports))]]
-             (remote-file/remote-file
-              (format "%s/%s.sh" config-dir fname)
-              :content (apply format-exports export-seq)))))
+  [config-dir env-map]
+  (for [[fname exports] env-map
+        :let [fname (name fname)
+              export-seq (flatten (seq exports))]]
+    (remote-file/remote-file
+     (format "%s/%s.sh" config-dir fname)
+     :content (apply format-exports export-seq))))
 
 ;; We do our development on local machines using `vmfest`, which
 ;; brought us in context with the next problem. Some clouds --
@@ -438,7 +607,7 @@ directory."
              :private compute/private-ip
              :public compute/primary-ip) master))))
 
-(defn configure
+(def-phase-fn configure
   "Configures a Hadoop cluster by creating all required default
   directories, and populating the proper configuration file
   options. The `properties` parameter must be a map of the form
@@ -449,26 +618,27 @@ directory."
      :hadoop-env {:export val ...}}
 
   No other top-level keys are supported at this time."
-  [request ip-type namenode-tag jobtracker-tag properties]
-  (let [conf-dir (str hadoop-home "/conf")
-        etc-conf-dir (stevedore/script
-                      (str (config-root) "/hadoop"))
-        nn-ip (get-master-ip request ip-type namenode-tag)
-        jt-ip (get-master-ip request ip-type jobtracker-tag)
-        pid-dir (stevedore/script (str (pid-root) "/hadoop"))
-        log-dir (stevedore/script (str (log-root) "/hadoop"))
-        defaults  (default-properties nn-ip jt-ip pid-dir log-dir)
-        [props env] (merge-and-split-config defaults properties)
-        tmp-dir (get-in properties [:core-site :hadoop.tmp.dir])]
-    (-> request
-        (for-> [path  [conf-dir tmp-dir log-dir pid-dir]]
-               (directory/directory path
-                                    :owner hadoop-user
-                                    :group hadoop-group
-                                    :mode "0755"))
-        (file/symbolic-link conf-dir etc-conf-dir)
-        (config-files conf-dir props)
-        (env-file conf-dir env))))
+  [ip-type namenode-tag jobtracker-tag properties]
+  (expose-request-as
+   [request]
+   (let [conf-dir (str hadoop-home "/conf")
+         etc-conf-dir (stevedore/script
+                       (str (config-root) "/hadoop"))
+         nn-ip (get-master-ip request ip-type namenode-tag)
+         jt-ip (get-master-ip request ip-type jobtracker-tag)
+         pid-dir (stevedore/script (str (pid-root) "/hadoop"))
+         log-dir (stevedore/script (str (log-root) "/hadoop"))
+         defaults  (default-properties nn-ip jt-ip pid-dir log-dir)
+         [props env] (merge-and-split-config defaults properties)
+         tmp-dir (get-in properties [:core-site :hadoop.tmp.dir])]
+     (for [path  [conf-dir tmp-dir log-dir pid-dir]]
+       (directory/directory path
+                            :owner hadoop-user
+                            :group hadoop-group
+                            :mode "0755"))
+     (file/symbolic-link conf-dir etc-conf-dir)
+     (config-files conf-dir props)
+     (env-file conf-dir env))))
 
 ;; The following script allows for proper transmission of SSH
 ;; commands, with hadoop's required `JAVA_HOME` property all set.
@@ -488,11 +658,10 @@ directory."
 ;; user. Future iterations may provide the ability to force some
 ;; daemon service to restart.
 
-(defn hadoop-service
+(def-phase-fn hadoop-service
   "Run a Hadoop service"
-  [request hadoop-daemon description]
+  [hadoop-daemon description]
   (exec-script/exec-checked-script
-   request
    (str "Start Hadoop " description)
    (as-user
     ~hadoop-user
@@ -503,12 +672,11 @@ directory."
          "start"
          ~hadoop-daemon))))))
 
-(defn hadoop-command
+(def-phase-fn hadoop-command
   "Runs '$ hadoop `args`' on each machine in the request. Command runs
   as the hadoop user."
-  [request & args]
+  [& args]
   (exec-script/exec-checked-script
-   request
    (apply str "hadoop " (interpose " " args))
    (as-user
     ~hadoop-user
@@ -524,12 +692,11 @@ directory."
 ;;been formatted, and asks for confirmation. The current version of
 ;;`format-namenode` sends a default "N" every time.
 
-(defn format-hdfs
+(def-phase-fn format-hdfs
   "Formats HDFS for the first time. If HDFS has already been
   formatted, does nothing."
-  [request]
+  []
   (exec-script/exec-script
-   request
    (as-user ~hadoop-user
             (pipe
              (echo "N")
@@ -540,28 +707,23 @@ directory."
 ;; And, here we are at the end! The following five functions activate
 ;; each of the five distinct roles that hadoop nodes may take on.
 
-(defn name-node
+(def-phase-fn name-node
   "Collection of all subphases required for a namenode."
-  [request data-dir]
-  (-> request
-      format-hdfs
-      (hadoop-service "namenode" "Name Node")
-      (hadoop-command "dfsadmin" "-safemode" "wait")
-      (hadoop-command "fs" "-mkdir" data-dir)
-      (hadoop-command "fs" "-chmod" "+w" data-dir)))
+  [data-dir]
+  format-hdfs
+  (hadoop-service "namenode" "Name Node")
+  (hadoop-command "dfsadmin" "-safemode" "wait")
+  (hadoop-command "fs" "-mkdir" data-dir)
+  (hadoop-command "fs" "-chmod" "+w" data-dir))
 
-(defn secondary-name-node
-  [request]
-  (hadoop-service request "secondarynamenode" "secondary name node"))
+(def-phase-fn secondary-name-node []
+  (hadoop-service "secondarynamenode" "secondary name node"))
 
-(defn job-tracker
-  [request]
-  (hadoop-service request "jobtracker" "job tracker"))
+(def-phase-fn job-tracker []
+  (hadoop-service "jobtracker" "job tracker"))
 
-(defn data-node
-  [request]
-  (hadoop-service request "datanode" "data node"))
+(def-phase-fn data-node []
+  (hadoop-service "datanode" "data node"))
 
-(defn task-tracker
-  [request]
-  (hadoop-service request "tasktracker" "task tracker"))
+(def-phase-fn task-tracker []
+  (hadoop-service "tasktracker" "task tracker"))
