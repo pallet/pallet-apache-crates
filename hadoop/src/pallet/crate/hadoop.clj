@@ -245,8 +245,6 @@
    (for [[k v] (partition 2 kv-pairs)]
      (format "export %s=%s\n" (name k) v))))
 
-;; Great! Now, on to Hadoop.
-;;
 ;; ## Hadoop Configuration
 ;;
 ;; This crate contains all information required to set up and
