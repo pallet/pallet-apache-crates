@@ -13,7 +13,7 @@
 
 (ns pallet.crate.hadoop
   "Pallet crate to manage Hadoop installation and configuration."
-  (:use [pallet.thread-expr :only (for-> apply->)])
+  (:use [pallet.thread-expr :only (apply->)])
   (:require [pallet.parameter :as parameter]
             [pallet.stevedore :as stevedore]
             [pallet.compute :as compute]
@@ -36,6 +36,23 @@
 
 ;; #### General Utilities
 ;;
+;; Updated version of `for->`, from `pallet.thread-expr`. This version
+;; has support for destructuring. We'll need to update the pallet
+;; dependency to take advantage of this.
+
+(defmacro for->
+  "Apply a thread expression to a sequence.
+   eg.
+      (-> 1
+        (for-> [x [1 2 3]]
+          (+ x)))
+   => 7"
+  [arg seq-exprs & body]
+  `(reduce #(%2 %1)
+           ~arg
+           (for ~seq-exprs
+             (fn [arg#] (-> arg# ~@body)))))
+
 ;; This one is generally quite useful; is there a place for this in
 ;; stevedore?
 
@@ -98,23 +115,24 @@
 ;;
 ;; before interacting with hadoop.
 
-(def-phase-fn create-hadoop-user
+(defn create-hadoop-user
   "Create a hadoop user on a cluster node. We add the hadoop binary
   directory and a `JAVA_HOME` setting to `$PATH` to facilitate
   development when manually logged in to some particular node."
-  []
-  (user/group hadoop-group :system true)
-  (user/user hadoop-user
-             :system true
-             :create-home true
-             :shell :bash)
-  (remote-file/remote-file (format "/home/%s/.bash_profile" hadoop-user)
-                           :owner hadoop-user
-                           :group hadoop-group
-                           :literal true
-                           :content (format-exports
-                                     :JAVA_HOME (stevedore/script (java/java-home))
-                                     :PATH (format "$PATH:%s/bin" hadoop-home))))
+  [request]
+  (-> request 
+      (user/group hadoop-group :system true)
+      (user/user hadoop-user
+                 :system true
+                 :create-home true
+                 :shell :bash)
+      (remote-file/remote-file (format "/home/%s/.bash_profile" hadoop-user)
+                               :owner hadoop-user
+                               :group hadoop-group
+                               :literal true
+                               :content (format-exports
+                                         :JAVA_HOME (stevedore/script (java/java-home))
+                                         :PATH (format "$PATH:%s/bin" hadoop-home)))))
 
 
 ;; Once the hadoop user is created, we create an ssh key for that user
@@ -143,13 +161,14 @@
     (for-> request [key keys]
            (ssh-key/authorize-key local-user key))))
 
-(def-phase-fn authorize-groups
+(defn authorize-groups
   "Authorizes the master node to ssh into this node."
-  [local-users tag-remote-users-map]
-  (for [local-user local-users
-        [group remote-users] tag-remote-users-map
-        remote-user remote-users]
-    (authorize-key local-user group remote-user)))
+  [request local-users tag-remote-users-map]
+  (-> request
+      (for-> [local-user local-users
+              [group remote-users] tag-remote-users-map
+              remote-user remote-users]
+             (authorize-key local-user group remote-user))))
 
 ;; In the current iteration, `publish-ssh-key` phase should only be
 ;; called on the job-tracker, and will only work with a subsequent
@@ -157,20 +176,20 @@
 ;; stateless between transactions, and the ssh key needs some way to
 ;; get between nodes. Currently, we store the new ssh key in the request.
 
-(def-phase-fn publish-ssh-key
-  []
-  (expose-request-as [request]
-   (let [id (request-map/target-id request)
-         tag (request-map/tag request)
-         key-name (format "%s_%s_key" tag id)]
-     (ssh-key/generate-key hadoop-user :comment key-name)
-     (ssh-key/record-public-key hadoop-user))))
+(defn publish-ssh-key
+  [request]
+  (let [id (request-map/target-id request)
+        tag (request-map/tag request)
+        key-name (format "%s_%s_key" tag id)]
+    (-> request
+        (ssh-key/generate-key hadoop-user :comment key-name)
+        (ssh-key/record-public-key hadoop-user))))
 
-(def-phase-fn authorize-jobtracker
+(defn authorize-jobtracker
   "configures all nodes to accept passwordless ssh requests from the
   jobtracker."
-  []
-  (authorize-groups [hadoop-user] {"jobtracker" [hadoop-user]}))
+  [request]
+  (authorize-groups request [hadoop-user] {"jobtracker" [hadoop-user]}))
 
 ;; ### Installation
 
@@ -188,19 +207,20 @@
                     default-version default-version))))
 
 
-(def-phase-fn install
+(defn install
   "First phase to be called when configuring a hadoop cluster. This
   phase creates a common hadoop user, and downloads and unpacks the
   default Cloudera hadoop distribution."
-  [build]
+  [request build]
   (let [url (url build)]
-    create-hadoop-user
-    (remote-directory/remote-directory hadoop-home
-                                       :url url
-                                       :unpack :tar
-                                       :tar-options "xz"
-                                       :owner hadoop-user
-                                       :group hadoop-user)))
+    (-> request
+        create-hadoop-user
+        (remote-directory/remote-directory hadoop-home
+                                           :url url
+                                           :unpack :tar
+                                           :tar-options "xz"
+                                           :owner hadoop-user
+                                           :group hadoop-user))))
 
 ;; ### Configuration
 ;;
@@ -344,17 +364,18 @@
     :hadoop.rpc.socket.factory.class.ClientProtocol
     :hadoop.rpc.socket.factory.class.JobSubmissionProtocol})
 
-(def-phase-fn config-files
+(defn config-files
   "Accepts a base directory and a map of [config-filename,
 property-map] pairs, and augments the supplied request to allow for
 the creation of each referenced configuration file within the base
 directory."
-  [config-dir properties]
-  (for [[filename props] properties]
-    (remote-file/remote-file
-     (format "%s/%s.xml" config-dir (name filename))
-     :content (properties->xml props)
-     :owner hadoop-user :group hadoop-group)))
+  [request config-dir properties]
+  (-> request
+      (for-> [[filename props] properties]
+             (remote-file/remote-file
+              (format "%s/%s.xml" config-dir (name filename))
+              :content (properties->xml props)
+              :owner hadoop-user :group hadoop-group))))
 
 (def merge-config (partial merge-with merge))
 
@@ -370,17 +391,18 @@ directory."
         envkey-seq [:hadoop-env]]
     (map #(select-keys prop-map %) [corekey-seq envkey-seq])))
 
-(def-phase-fn env-file
+(defn env-file
   "Phase that creates the `hadoop-env.sh` file with references to the
   supplied pid and log dirs. `hadoop-env.sh` will be placed within the
   supplied config directory."
-  [config-dir env-map]
-  (for [[fname exports] env-map
-        :let [fname (name fname)
-              export-seq (flatten (seq exports))]]
-    (remote-file/remote-file
-     (format "%s/%s.sh" config-dir fname)
-     :content (apply format-exports export-seq))))
+  [request config-dir env-map]
+  (-> request
+      (for-> [[fname exports] env-map
+              :let [fname (name fname)
+                    export-seq (flatten (seq exports))]]
+             (remote-file/remote-file
+              (format "%s/%s.sh" config-dir fname)
+              :content (apply format-exports export-seq)))))
 
 ;; We do our development on local machines using `vmfest`, which
 ;; brought us in context with the next problem. Some clouds --
@@ -416,7 +438,7 @@ directory."
              :private compute/private-ip
              :public compute/primary-ip) master))))
 
-(def-phase-fn configure
+(defn configure
   "Configures a Hadoop cluster by creating all required default
   directories, and populating the proper configuration file
   options. The `properties` parameter must be a map of the form
@@ -427,27 +449,26 @@ directory."
      :hadoop-env {:export val ...}}
 
   No other top-level keys are supported at this time."
-  [ip-type namenode-tag jobtracker-tag properties]
-  (expose-request-as
-   [request]
-   (let [conf-dir (str hadoop-home "/conf")
-         etc-conf-dir (stevedore/script
-                       (str (config-root) "/hadoop"))
-         nn-ip (get-master-ip request ip-type namenode-tag)
-         jt-ip (get-master-ip request ip-type jobtracker-tag)
-         pid-dir (stevedore/script (str (pid-root) "/hadoop"))
-         log-dir (stevedore/script (str (log-root) "/hadoop"))
-         defaults  (default-properties nn-ip jt-ip pid-dir log-dir)
-         [props env] (merge-and-split-config defaults properties)
-         tmp-dir (get-in properties [:core-site :hadoop.tmp.dir])]
-     (for [path  [conf-dir tmp-dir log-dir pid-dir]]
-       (directory/directory path
-                            :owner hadoop-user
-                            :group hadoop-group
-                            :mode "0755"))
-     (file/symbolic-link conf-dir etc-conf-dir)
-     (config-files conf-dir props)
-     (env-file conf-dir env))))
+  [request ip-type namenode-tag jobtracker-tag properties]
+  (let [conf-dir (str hadoop-home "/conf")
+        etc-conf-dir (stevedore/script
+                      (str (config-root) "/hadoop"))
+        nn-ip (get-master-ip request ip-type namenode-tag)
+        jt-ip (get-master-ip request ip-type jobtracker-tag)
+        pid-dir (stevedore/script (str (pid-root) "/hadoop"))
+        log-dir (stevedore/script (str (log-root) "/hadoop"))
+        defaults  (default-properties nn-ip jt-ip pid-dir log-dir)
+        [props env] (merge-and-split-config defaults properties)
+        tmp-dir (get-in properties [:core-site :hadoop.tmp.dir])]
+    (-> request
+        (for-> [path  [conf-dir tmp-dir log-dir pid-dir]]
+               (directory/directory path
+                                    :owner hadoop-user
+                                    :group hadoop-group
+                                    :mode "0755"))
+        (file/symbolic-link conf-dir etc-conf-dir)
+        (config-files conf-dir props)
+        (env-file conf-dir env))))
 
 ;; The following script allows for proper transmission of SSH
 ;; commands, with hadoop's required `JAVA_HOME` property all set.
@@ -467,10 +488,11 @@ directory."
 ;; user. Future iterations may provide the ability to force some
 ;; daemon service to restart.
 
-(def-phase-fn hadoop-service
+(defn hadoop-service
   "Run a Hadoop service"
-  [hadoop-daemon description]
+  [request hadoop-daemon description]
   (exec-script/exec-checked-script
+   request
    (str "Start Hadoop " description)
    (as-user
     ~hadoop-user
@@ -481,11 +503,12 @@ directory."
          "start"
          ~hadoop-daemon))))))
 
-(def-phase-fn hadoop-command
+(defn hadoop-command
   "Runs '$ hadoop `args`' on each machine in the request. Command runs
   as the hadoop user."
-  [& args]
+  [request & args]
   (exec-script/exec-checked-script
+   request
    (apply str "hadoop " (interpose " " args))
    (as-user
     ~hadoop-user
@@ -501,11 +524,12 @@ directory."
 ;;been formatted, and asks for confirmation. The current version of
 ;;`format-namenode` sends a default "N" every time.
 
-(def-phase-fn format-hdfs
+(defn format-hdfs
   "Formats HDFS for the first time. If HDFS has already been
   formatted, does nothing."
-  []
+  [request]
   (exec-script/exec-script
+   request
    (as-user ~hadoop-user
             (pipe
              (echo "N")
@@ -516,23 +540,28 @@ directory."
 ;; And, here we are at the end! The following five functions activate
 ;; each of the five distinct roles that hadoop nodes may take on.
 
-(def-phase-fn name-node
+(defn name-node
   "Collection of all subphases required for a namenode."
-  [data-dir]
-  format-hdfs
-  (hadoop-service "namenode" "Name Node")
-  (hadoop-command "dfsadmin" "-safemode" "wait")
-  (hadoop-command "fs" "-mkdir" data-dir)
-  (hadoop-command "fs" "-chmod" "+w" data-dir))
+  [request data-dir]
+  (-> request
+      format-hdfs
+      (hadoop-service "namenode" "Name Node")
+      (hadoop-command "dfsadmin" "-safemode" "wait")
+      (hadoop-command "fs" "-mkdir" data-dir)
+      (hadoop-command "fs" "-chmod" "+w" data-dir)))
 
-(def-phase-fn secondary-name-node []
-  (hadoop-service "secondarynamenode" "secondary name node"))
+(defn secondary-name-node
+  [request]
+  (hadoop-service request "secondarynamenode" "secondary name node"))
 
-(def-phase-fn job-tracker []
-  (hadoop-service "jobtracker" "job tracker"))
+(defn job-tracker
+  [request]
+  (hadoop-service request "jobtracker" "job tracker"))
 
-(def-phase-fn data-node []
-  (hadoop-service "datanode" "data node"))
+(defn data-node
+  [request]
+  (hadoop-service request "datanode" "data node"))
 
-(def-phase-fn task-tracker []
-  (hadoop-service "tasktracker" "task tracker"))
+(defn task-tracker
+  [request]
+  (hadoop-service request "tasktracker" "task tracker"))
