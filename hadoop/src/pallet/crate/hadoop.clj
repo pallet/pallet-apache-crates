@@ -15,7 +15,8 @@
   "Pallet crate to manage Hadoop installation and configuration."
   (:use [clojure.contrib.def :only (name-with-attributes)]
         [pallet.thread-expr :only (apply->)])
-  (:require [clojure.contrib.condition :as condition]
+  (:require pallet.resource.filesystem-layout
+            [clojure.contrib.condition :as condition]
             [clojure.contrib.macro-utils :as macro]
             [pallet.parameter :as parameter]
             [pallet.stevedore :as stevedore]
@@ -45,6 +46,18 @@
 ;;that a `phase-fn` with arguments might afford.
 
 ;; #### Threading Macros
+
+(defmacro binding->
+  "A `binding` form that can appear in a request thread.
+   eg.
+      (def *a* 0)
+      (-> 1
+        (binding-> [*a* 1]
+          (+ a)))
+   => 2"
+  [arg bindings & body]
+  `(binding ~bindings
+     (-> ~arg ~@body)))
 
 (defmacro for->
   "Apply a thread expression to a sequence.
@@ -118,6 +131,7 @@
     [~'when pallet.thread-expr/when->
      ~'for for->
      ~'let let->
+     ~'binding binding->
      ~'expose-request-as expose-arg->]
     (-> ~@forms)))
 
@@ -231,8 +245,6 @@
    (for [[k v] (partition 2 kv-pairs)]
      (format "export %s=%s\n" (name k) v))))
 
-;; Great! Now, on to Hadoop.
-;;
 ;; ## Hadoop Configuration
 ;;
 ;; This crate contains all information required to set up and
@@ -353,11 +365,12 @@
      (ssh-key/generate-key hadoop-user :comment key-name)
      (ssh-key/record-public-key hadoop-user))))
 
-(def-phase-fn authorize-jobtracker
+(def-phase-fn authorize-tag
   "configures all nodes to accept passwordless ssh requests from the
-  jobtracker."
-  []
-  (authorize-groups [hadoop-user] {"jobtracker" [hadoop-user]}))
+  node with the supplied tag."
+  [master-tag]
+  (let [tag (name master-tag)]
+    (authorize-groups [hadoop-user] {tag [hadoop-user]})))
 
 ;; ### Installation
 ;;
@@ -541,11 +554,12 @@ property-map] pairs, and augments the supplied request to allow for
 the creation of each referenced configuration file within the base
 directory."
   [config-dir properties]
-  (for [[filename props] properties]
-    (remote-file/remote-file
-     (format "%s/%s.xml" config-dir (name filename))
-     :content (properties->xml props)
-     :owner hadoop-user :group hadoop-group)))
+  (binding [remote-file/force-overwrite true]
+    (for [[filename props] properties]
+      (remote-file/remote-file
+       (format "%s/%s.xml" config-dir (name filename))
+       :content (properties->xml props)
+       :owner hadoop-user :group hadoop-group))))
 
 (def merge-config (partial merge-with merge))
 
