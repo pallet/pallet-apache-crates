@@ -365,11 +365,12 @@
      (ssh-key/generate-key hadoop-user :comment key-name)
      (ssh-key/record-public-key hadoop-user))))
 
-(def-phase-fn authorize-jobtracker
+(def-phase-fn authorize-tag
   "configures all nodes to accept passwordless ssh requests from the
-  jobtracker."
-  []
-  (authorize-groups [hadoop-user] {"jobtracker" [hadoop-user]}))
+  node with the supplied tag."
+  [master-tag]
+  (let [tag (name master-tag)]
+    (authorize-groups [hadoop-user] {tag [hadoop-user]})))
 
 ;; ### Installation
 ;;
