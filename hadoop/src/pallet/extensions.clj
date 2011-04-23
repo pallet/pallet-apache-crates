@@ -1,6 +1,6 @@
 (ns pallet.extensions
     (:use [clojure.contrib.def :only (name-with-attributes)]
-          [pallet.thread-expr :only (apply->)])
+          [pallet.thread-expr :only (apply-> for-> let-> arg-> binding->)])
     (:require pallet.resource.filesystem-layout
             [clojure.contrib.condition :as condition]
             [clojure.contrib.macro-utils :as macro]))
@@ -12,69 +12,6 @@
 ;; them here for demonstration, and as an example of the flexibility
 ;;that a `phase-fn` with arguments might afford.
 
-;; #### Threading Macros
-
-(defmacro binding->
-  "A `binding` form that can appear in a request thread.
-   eg.
-      (def *a* 0)
-      (-> 1
-        (binding-> [*a* 1]
-          (+ a)))
-   => 2"
-  [arg bindings & body]
-  `(binding ~bindings
-     (-> ~arg ~@body)))
-
-(defmacro for->
-  "Apply a thread expression to a sequence.
-   eg.
-      (-> 1
-        (for-> [x [1 2 3]]
-          (+ x)))
-   => 7"
-  [arg seq-exprs & body]
-  `(reduce #(%2 %1)
-           ~arg
-           (for ~seq-exprs
-             (fn [arg#] (-> arg# ~@body)))))
-
-(defmacro let->
-  "Allows binding of variables in a threading expression, with support
-  for destructuring. For example:
-
- (-> 5
-    (let-> [x 10]
-           (for-> [y (range 4)
-                   z (range 2)] (+ x y z))))
- ;=> 101"
-  [arg letvec & body]
-  `(let ~letvec (-> ~arg ~@body)))
-
-(defmacro expose-arg->
-  "A threaded form that exposes the value of the threaded arg. For
-  example:
-
-    (-> 1
-      (expose-arg-> [arg]
-        (+ arg)))
-  ;=> 2"
-  [arg [sym] & body]
-  `(let [~sym ~arg] (-> ~sym ~@body)))
-
-(defmacro let-with-arg->
-  "A `let` form that can appear in a request thread, and assign the
-   value of the threaded arg.
-
-   eg.
-      (-> 1
-        (let-with-arg-> val [a 1]
-          (+ a val)))
-   => 3"
-  [arg sym binding & body]
-  `(let [~sym ~arg
-         ~@binding]
-     (-> ~sym ~@body)))
 
 ;; Here's the macro we've been waiting for. Pallet makes heavy use of
 ;; threading to build up its requests; each phase accepts an argument
@@ -99,7 +36,7 @@
      ~'for for->
      ~'let let->
      ~'binding binding->
-     ~'expose-request-as expose-arg->]
+     ~'expose-request-as arg->]
     (-> ~@forms)))
 
 ;; #### Phase Macros

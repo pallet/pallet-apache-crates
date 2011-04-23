@@ -13,7 +13,8 @@
 
 (ns pallet.crate.hadoop
   "Pallet crate to manage Hadoop installation and configuration."
-  (:use [pallet.extensions :only (def-phase-fn phase-fn)])
+  (:use [pallet.extensions :only (def-phase-fn phase-fn)]
+        [pallet.thread-expr :only (for->)])
   (:require pallet.resource.filesystem-layout
             [pallet.parameter :as parameter]
             [pallet.stevedore :as stevedore]
