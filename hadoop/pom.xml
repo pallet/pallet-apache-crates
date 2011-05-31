@@ -18,6 +18,7 @@
     </plugins>
   </build>
   <dependencies>
+    <dependency>
       <groupId>org.cloudhoist</groupId>
       <artifactId>java</artifactId>
       <version>0.4.0</version>
