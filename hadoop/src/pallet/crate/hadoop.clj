@@ -20,12 +20,12 @@
             [pallet.stevedore :as stevedore]
             [pallet.compute :as compute]
             [pallet.request-map :as request-map]
-            [pallet.resource.directory :as directory]
-            [pallet.resource.exec-script :as exec-script]
-            [pallet.resource.file :as file]
-            [pallet.resource.remote-directory :as remote-directory]
-            [pallet.resource.remote-file :as remote-file]
-            [pallet.resource.user :as user]
+            [pallet.action.directory :as directory]
+            [pallet.action.exec-script :as exec-script]
+            [pallet.action.file :as file]
+            [pallet.action.remote-directory :as remote-directory]
+            [pallet.action.remote-file :as remote-file]
+            [pallet.action.user :as user]
             [pallet.script :as script]
             [clojure.contrib.prxml :as prxml]
             [clojure.string :as string]
@@ -459,10 +459,10 @@ directory."
 ;; commands, with hadoop's required `JAVA_HOME` property all set.
 
 (script/defscript as-user [user & command])
-(stevedore/defimpl as-user :default [user & command]
+(script/defimpl as-user :default [user & command]
   (su -s "/bin/bash" ~user
       -c "\"" (str "export JAVA_HOME=" (java-home) ";") ~@command "\""))
-(stevedore/defimpl as-user [#{:yum}] [user & command]
+(script/defimpl as-user [#{:yum}] [user & command]
   ("/sbin/runuser" -s "/bin/bash" - ~user -c ~@command))
 
 ;; Hadoop services, or `roles`, are all run by the `hadoop-daemon.sh`
