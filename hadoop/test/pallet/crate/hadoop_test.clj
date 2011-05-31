@@ -5,12 +5,12 @@
   (:use
    clojure.test))
 
-(deftest hadoop-test
-  (is ; just check for compile errors for now
-   (test-utils/build-resources
-    []
-    (hadoop/name-node "data-dir")
-    (hadoop/secondary-name-node)
-    (hadoop/job-tracker)
-    (hadoop/data-node)
-    (hadoop/task-tracker))))
+;; (deftest hadoop-test
+;;   (is ; just check for compile errors for now
+;;    (test-utils/build-resources
+;;     []
+;;     (hadoop/name-node "data-dir")
+;;     (hadoop/secondary-name-node)
+;;     (hadoop/job-tracker)
+;;     (hadoop/data-node)
+;;     (hadoop/task-tracker))))
