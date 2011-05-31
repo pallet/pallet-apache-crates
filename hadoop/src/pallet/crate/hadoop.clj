@@ -13,9 +13,9 @@
 
 (ns pallet.crate.hadoop
   "Pallet crate to manage Hadoop installation and configuration."
-  (:use [pallet.extensions :only (def-phase-fn phase-fn)]
-        [pallet.thread-expr :only (for->)])
+  (:use [pallet.extensions :only (def-phase-fn phase-fn)])
   (:require pallet.resource.filesystem-layout
+            [pallet.thread-expr :as thread]
             [pallet.parameter :as parameter]
             [pallet.stevedore :as stevedore]
             [pallet.compute :as compute]
@@ -141,7 +141,7 @@
 (defn- authorize-key
   [request local-user group remote-user]
   (let [keys (get-keys-for-group request group remote-user)]
-    (for-> request [key keys]
+    (thread/for-> request [key keys]
            (ssh-key/authorize-key local-user key))))
 
 (def-phase-fn authorize-groups
@@ -293,7 +293,6 @@
                    :mapred.local.dir (owner-subdir "/mapred/local")
                    :mapred.system.dir "/hadoop/mapred/system"
                    :mapred.child.java.opts "-Xmx550m"
-                   :mapred.child.ulimit 1126400
                    :mapred.job.tracker (format "%s:8021" job-tracker-ip)
                    :mapred.job.tracker.handler.count 10
                    :mapred.map.tasks.speculative.execution true

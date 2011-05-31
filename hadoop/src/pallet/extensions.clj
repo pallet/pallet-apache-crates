@@ -1,7 +1,6 @@
 (ns pallet.extensions
-    (:use [clojure.contrib.def :only (name-with-attributes)]
-          [pallet.thread-expr :only (apply-> for-> let-> arg-> binding->)])
-    (:require pallet.resource.filesystem-layout
+  (:use [clojure.contrib.def :only (name-with-attributes)])
+  (:require pallet.resource.filesystem-layout
             [clojure.contrib.condition :as condition]
             [clojure.contrib.macro-utils :as macro]))
 
@@ -33,10 +32,10 @@
   [& forms]
   `(macro/symbol-macrolet
     [~'when pallet.thread-expr/when->
-     ~'for for->
-     ~'let let->
-     ~'binding binding->
-     ~'expose-request-as arg->]
+     ~'for pallet.thread-expr/for->
+     ~'let pallet.thread-expr/let->
+     ~'binding pallet.thread-expr/binding->
+     ~'expose-request-as pallet.thread-expr/arg->]
     (-> ~@forms)))
 
 ;; #### Phase Macros
