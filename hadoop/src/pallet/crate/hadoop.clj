@@ -19,7 +19,7 @@
             [pallet.parameter :as parameter]
             [pallet.stevedore :as stevedore]
             [pallet.compute :as compute]
-            [pallet.request-map :as request-map]
+            [pallet.session :as session]
             [pallet.action.directory :as directory]
             [pallet.action.exec-script :as exec-script]
             [pallet.action.file :as file]
@@ -160,11 +160,13 @@
 
 (def-phase-fn publish-ssh-key
   []
-  (expose-request-as [request]
-   (let [id (request-map/target-id request)
-         tag (request-map/tag request)
+  (expose-request-as
+   [request]
+   (let [id (session/target-id request)
+         tag (session/group-name request)
          key-name (format "%s_%s_key" tag id)]
      (ssh-key/generate-key hadoop-user :comment key-name)
+     ((fn [arg] (do (println (type (:phase arg))) arg)))
      (ssh-key/record-public-key hadoop-user))))
 
 (def-phase-fn authorize-tag
