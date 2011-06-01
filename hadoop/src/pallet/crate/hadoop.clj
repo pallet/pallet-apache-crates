@@ -14,7 +14,7 @@
 (ns pallet.crate.hadoop
   "Pallet crate to manage Hadoop installation and configuration."
   (:use [pallet.extensions :only (def-phase-fn phase-fn)])
-  (:require pallet.script.lib
+  (:require [pallet.script.lib :as lib]
             [pallet.thread-expr :as thread]
             [pallet.parameter :as parameter]
             [pallet.stevedore :as stevedore]
@@ -438,15 +438,15 @@ directory."
    [request]
    (let [conf-dir (str hadoop-home "/conf")
          etc-conf-dir (stevedore/script
-                       (str (config-root) "/hadoop"))
+                       (str (~lib/config-root) "/hadoop"))
          nn-ip (get-master-ip request ip-type namenode-tag)
          jt-ip (get-master-ip request ip-type jobtracker-tag)
-         pid-dir (stevedore/script (str (pid-root) "/hadoop"))
-         log-dir (stevedore/script (str (log-root) "/hadoop"))
+         pid-dir (stevedore/script (str (~lib/pid-root) "/hadoop"))
+         log-dir (stevedore/script (str (~lib/log-root) "/hadoop"))
          defaults  (default-properties nn-ip jt-ip pid-dir log-dir)
          [props env] (merge-and-split-config defaults properties)
          tmp-dir (get-in properties [:core-site :hadoop.tmp.dir])]
-     (for [path  [conf-dir tmp-dir log-dir pid-dir]]
+     (for [path [conf-dir tmp-dir log-dir pid-dir]]
        (directory/directory path
                             :owner hadoop-user
                             :group hadoop-group
