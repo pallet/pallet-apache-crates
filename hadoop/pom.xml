@@ -16,10 +16,6 @@
     </dependency>
     <dependency>
       <groupId>org.cloudhoist</groupId>
-      <artifactId>java</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.cloudhoist</groupId>
       <artifactId>ssh-key</artifactId>
     </dependency>
   </dependencies>
