@@ -13,26 +13,14 @@
     <dependency>
       <groupId>org.cloudhoist</groupId>
       <artifactId>java</artifactId>
-<<<<<<< HEAD
-=======
-      <version>0.5.0</version>
     </dependency>
     <dependency>
       <groupId>org.cloudhoist</groupId>
-<<<<<<< HEAD
       <artifactId>java</artifactId>
-      <version>0.5.0</version>
->>>>>>> upgraded hadoop crate, plus all poms.
     </dependency>
     <dependency>
       <groupId>org.cloudhoist</groupId>
-=======
->>>>>>> removed extra java dependency. Commented out failing test.
       <artifactId>ssh-key</artifactId>
-<<<<<<< HEAD
-=======
-      <version>0.5.0</version>
->>>>>>> upgraded hadoop crate, plus all poms.
     </dependency>
   </dependencies>
 </project>
