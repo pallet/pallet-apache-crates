@@ -127,7 +127,7 @@
 (defn- get-node-ids-for-group
   "Get the id of the nodes in a group node"
   [request tag]
-  (let [nodes (request-map/nodes-in-tag request tag)]
+  (let [nodes (session/nodes-in-group request tag)]
     (map compute/id nodes)))
 
 (defn- get-keys-for-group
@@ -281,7 +281,7 @@
   "Returns a nested map of Hadoop default configuration properties,
   named according to the 0.20 api."
   [name-node-ip job-tracker-ip pid-dir log-dir]
-  (let [owner-dir (stevedore/script (user/user-home ~hadoop-user))
+  (let [owner-dir (stevedore/script (~lib/user-home ~hadoop-user))
         owner-subdir (partial str owner-dir)]
     {:hdfs-site {:dfs.data.dir (owner-subdir "/dfs/data")
                  :dfs.name.dir (owner-subdir "/dfs/name")
@@ -413,7 +413,7 @@ directory."
   logs a warning if more than one master exists."
   [request ip-type tag]
   {:pre [(contains? #{:public :private} ip-type)]}
-  (let [[master :as nodes] (request-map/nodes-in-tag request tag)
+  (let [[master :as nodes] (session/nodes-in-group request tag)
         kind (name tag)]
     (when (> (count nodes) 1)
       (log/warn (format "There are more than one %s" kind)))
@@ -462,7 +462,7 @@ directory."
 (script/defscript as-user [user & command])
 (script/defimpl as-user :default [user & command]
   (su -s "/bin/bash" ~user
-      -c "\"" (str "export JAVA_HOME=" (java-home) ";") ~@command "\""))
+      -c "\"" (str "export JAVA_HOME=" (~java/java-home) ";") ~@command "\""))
 (script/defimpl as-user [#{:yum}] [user & command]
   ("/sbin/runuser" -s "/bin/bash" - ~user -c ~@command))
 
@@ -479,7 +479,7 @@ directory."
   [hadoop-daemon description]
   (exec-script/exec-checked-script
    (str "Start Hadoop " description)
-   (as-user
+   (~as-user
     ~hadoop-user
     ~(stevedore/script
       (if-not (pipe (jps)
@@ -494,7 +494,7 @@ directory."
   [& args]
   (exec-script/exec-checked-script
    (apply str "hadoop " (interpose " " args))
-   (as-user
+   (~as-user
     ~hadoop-user
     (str ~hadoop-home "/bin/hadoop")
     ~@args)))
@@ -513,12 +513,12 @@ directory."
   formatted, does nothing."
   []
   (exec-script/exec-script
-   (as-user ~hadoop-user
-            (pipe
-             (echo "N")
-             ((str ~hadoop-home "/bin/hadoop")
-              "namenode"
-              "-format")))))
+   (~as-user ~hadoop-user
+             (pipe
+              (echo "N")
+              ((str ~hadoop-home "/bin/hadoop")
+               "namenode"
+               "-format")))))
 
 ;; And, here we are at the end! The following five functions activate
 ;; each of the five distinct roles that hadoop nodes may take on.
