@@ -114,7 +114,7 @@
                            :group hadoop-group
                            :literal true
                            :content (format-exports
-                                     :JAVA_HOME (stevedore/script (java/java-home))
+                                     :JAVA_HOME (stevedore/script (~java/java-home))
                                      :PATH (format "$PATH:%s/bin" hadoop-home))))
 
 
