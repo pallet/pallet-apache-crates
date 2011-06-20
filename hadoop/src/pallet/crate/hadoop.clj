@@ -142,7 +142,7 @@
   [request local-user group remote-user]
   (let [keys (get-keys-for-group request group remote-user)]
     (thread/for-> request [key keys]
-           (ssh-key/authorize-key local-user key))))
+                  (ssh-key/authorize-key local-user key))))
 
 (def-phase-fn authorize-groups
   "Authorizes the master node to ssh into this node."
@@ -166,7 +166,6 @@
          tag (session/group-name request)
          key-name (format "%s_%s_key" tag id)]
      (ssh-key/generate-key hadoop-user :comment key-name)
-     ((fn [arg] (do (println (type (:phase arg))) arg)))
      (ssh-key/record-public-key hadoop-user))))
 
 (def-phase-fn authorize-tag
