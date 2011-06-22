@@ -14,12 +14,12 @@
 (ns pallet.crate.hadoop
   "Pallet crate to manage Hadoop installation and configuration."
   (:use [pallet.extensions :only (def-phase-fn phase-fn)])
-  (:require pallet.resource.filesystem-layout
+  (:require [pallet.script.lib :as lib]
             [pallet.thread-expr :as thread]
             [pallet.parameter :as parameter]
             [pallet.stevedore :as stevedore]
             [pallet.compute :as compute]
-            [pallet.request-map :as request-map]
+            [pallet.session :as session]
             [pallet.action.directory :as directory]
             [pallet.action.exec-script :as exec-script]
             [pallet.action.file :as file]
@@ -114,7 +114,7 @@
                            :group hadoop-group
                            :literal true
                            :content (format-exports
-                                     :JAVA_HOME (stevedore/script (java/java-home))
+                                     :JAVA_HOME (stevedore/script (~java/java-home))
                                      :PATH (format "$PATH:%s/bin" hadoop-home))))
 
 
@@ -127,7 +127,7 @@
 (defn- get-node-ids-for-group
   "Get the id of the nodes in a group node"
   [request tag]
-  (let [nodes (request-map/nodes-in-tag request tag)]
+  (let [nodes (session/nodes-in-group request tag)]
     (map compute/id nodes)))
 
 (defn- get-keys-for-group
@@ -142,7 +142,7 @@
   [request local-user group remote-user]
   (let [keys (get-keys-for-group request group remote-user)]
     (thread/for-> request [key keys]
-           (ssh-key/authorize-key local-user key))))
+                  (ssh-key/authorize-key local-user key))))
 
 (def-phase-fn authorize-groups
   "Authorizes the master node to ssh into this node."
@@ -160,9 +160,10 @@
 
 (def-phase-fn publish-ssh-key
   []
-  (expose-request-as [request]
-   (let [id (request-map/target-id request)
-         tag (request-map/tag request)
+  (expose-request-as
+   [request]
+   (let [id (session/target-id request)
+         tag (session/group-name request)
          key-name (format "%s_%s_key" tag id)]
      (ssh-key/generate-key hadoop-user :comment key-name)
      (ssh-key/record-public-key hadoop-user))))
@@ -280,7 +281,7 @@
   "Returns a nested map of Hadoop default configuration properties,
   named according to the 0.20 api."
   [name-node-ip job-tracker-ip pid-dir log-dir]
-  (let [owner-dir (stevedore/script (user/user-home ~hadoop-user))
+  (let [owner-dir (stevedore/script (~lib/user-home ~hadoop-user))
         owner-subdir (partial str owner-dir)]
     {:hdfs-site {:dfs.data.dir (owner-subdir "/dfs/data")
                  :dfs.name.dir (owner-subdir "/dfs/name")
@@ -412,7 +413,7 @@ directory."
   logs a warning if more than one master exists."
   [request ip-type tag]
   {:pre [(contains? #{:public :private} ip-type)]}
-  (let [[master :as nodes] (request-map/nodes-in-tag request tag)
+  (let [[master :as nodes] (session/nodes-in-group request tag)
         kind (name tag)]
     (when (> (count nodes) 1)
       (log/warn (format "There are more than one %s" kind)))
@@ -438,15 +439,15 @@ directory."
    [request]
    (let [conf-dir (str hadoop-home "/conf")
          etc-conf-dir (stevedore/script
-                       (str (config-root) "/hadoop"))
+                       (str (~lib/config-root) "/hadoop"))
          nn-ip (get-master-ip request ip-type namenode-tag)
          jt-ip (get-master-ip request ip-type jobtracker-tag)
-         pid-dir (stevedore/script (str (pid-root) "/hadoop"))
-         log-dir (stevedore/script (str (log-root) "/hadoop"))
+         pid-dir (stevedore/script (str (~lib/pid-root) "/hadoop"))
+         log-dir (stevedore/script (str (~lib/log-root) "/hadoop"))
          defaults  (default-properties nn-ip jt-ip pid-dir log-dir)
          [props env] (merge-and-split-config defaults properties)
          tmp-dir (get-in properties [:core-site :hadoop.tmp.dir])]
-     (for [path  [conf-dir tmp-dir log-dir pid-dir]]
+     (for [path [conf-dir tmp-dir log-dir pid-dir]]
        (directory/directory path
                             :owner hadoop-user
                             :group hadoop-group
@@ -461,7 +462,7 @@ directory."
 (script/defscript as-user [user & command])
 (script/defimpl as-user :default [user & command]
   (su -s "/bin/bash" ~user
-      -c "\"" (str "export JAVA_HOME=" (java-home) ";") ~@command "\""))
+      -c "\"" (str "export JAVA_HOME=" (~java/java-home) ";") ~@command "\""))
 (script/defimpl as-user [#{:yum}] [user & command]
   ("/sbin/runuser" -s "/bin/bash" - ~user -c ~@command))
 
@@ -478,7 +479,7 @@ directory."
   [hadoop-daemon description]
   (exec-script/exec-checked-script
    (str "Start Hadoop " description)
-   (as-user
+   (~as-user
     ~hadoop-user
     ~(stevedore/script
       (if-not (pipe (jps)
@@ -493,7 +494,7 @@ directory."
   [& args]
   (exec-script/exec-checked-script
    (apply str "hadoop " (interpose " " args))
-   (as-user
+   (~as-user
     ~hadoop-user
     (str ~hadoop-home "/bin/hadoop")
     ~@args)))
@@ -512,12 +513,12 @@ directory."
   formatted, does nothing."
   []
   (exec-script/exec-script
-   (as-user ~hadoop-user
-            (pipe
-             (echo "N")
-             ((str ~hadoop-home "/bin/hadoop")
-              "namenode"
-              "-format")))))
+   (~as-user ~hadoop-user
+             (pipe
+              (echo "N")
+              ((str ~hadoop-home "/bin/hadoop")
+               "namenode"
+               "-format")))))
 
 ;; And, here we are at the end! The following five functions activate
 ;; each of the five distinct roles that hadoop nodes may take on.
