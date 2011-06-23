@@ -106,6 +106,7 @@
   []
   (user/group hadoop-group :system true)
   (user/user hadoop-user
+             :group hadoop-group
              :system true
              :create-home true
              :shell :bash)

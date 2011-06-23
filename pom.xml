@@ -9,7 +9,7 @@
   </parent>
   <groupId>org.cloudhoist</groupId>
   <artifactId>pallet-apache-crates</artifactId>
-  <version>0.5.2-SNAPSHOT</version>
+  <version>0.6.1-SNAPSHOT</version>
   <packaging>pom</packaging>
   <name>pallet apache crates</name>
   <description>Pallet Apache Crates</description>
@@ -164,7 +164,7 @@
   </repositories>
 
   <properties>
-    <pallet.version>0.5.1</pallet.version>
+    <pallet.version>0.6.1</pallet.version>
   </properties>
 
 </project>
