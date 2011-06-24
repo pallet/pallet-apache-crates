@@ -1,5 +1,8 @@
 # Release Notes
 
+# 0.6.0
+- upgraded pom for pallet 0.6.1, and fixed issue with group creation.
+
 # 0.5.1
 
 - fixed issues with defscripts preventing configuration files from loading
