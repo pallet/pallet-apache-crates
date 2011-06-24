@@ -9,9 +9,8 @@
 ;; We start with a few extensions to pallet's crate writing
 ;; facilities. These may or may not make it into pallet proper; we use
 ;; them here for demonstration, and as an example of the flexibility
-;;that a `phase-fn` with arguments might afford.
-
-
+;; that a `phase-fn` with arguments might afford.
+;;
 ;; Here's the macro we've been waiting for. Pallet makes heavy use of
 ;; threading to build up its requests; each phase accepts an argument
 ;; vector, binds locals, and either directly modify the request, or
